@@ -15,48 +15,20 @@ from decimal import Decimal
 import pytest
 from django.test import TestCase, TransactionTestCase
 
-from apps.branches.models import Branch
-from apps.products.models import Product
-from apps.stock.models import Stock
+from tests.factories import (
+    AdminFactory,
+    BranchFactory,
+    ProductFactory,
+    StockFactory,
+)
 from apps.movements.models import StockMovement, MovementStatus, MovementType
 from apps.movements.services import StockMovementService
-from apps.users.models import User
+from apps.stock.models import Stock
 from core.exceptions import (
     InsufficientStockError,
     InvalidMovementError,
     TransferAlreadyConfirmedError,
 )
-
-
-# ---------------------------------------------------------------------------
-# Fixtures / helpers
-# ---------------------------------------------------------------------------
-
-def make_branch(name="Branch A"):
-    return Branch.objects.create(name=name, address="Test Street 1")
-
-
-def make_product(sku="SKU001", unit_type="unit"):
-    return Product.objects.create(sku=sku, name=f"Product {sku}", unit_type=unit_type)
-
-
-def make_admin(email="admin@test.com"):
-    branch = make_branch("Admin Branch")
-    return User.objects.create_user(
-        email=email, password="testpass123", full_name="Admin User",
-        role="admin", branch=None,
-    )
-
-
-def make_seller(branch, email="seller@test.com"):
-    return User.objects.create_user(
-        email=email, password="testpass123", full_name="Seller User",
-        role="seller", branch=branch,
-    )
-
-
-def make_stock(product, branch, quantity):
-    return Stock.objects.create(product=product, branch=branch, quantity=quantity)
 
 
 # ---------------------------------------------------------------------------
@@ -66,9 +38,9 @@ def make_stock(product, branch, quantity):
 class TestIngreso(TestCase):
 
     def setUp(self):
-        self.admin   = make_admin()
-        self.branch  = make_branch()
-        self.product = make_product()
+        self.admin   = AdminFactory()
+        self.branch  = BranchFactory()
+        self.product = ProductFactory()
 
     def test_ingreso_creates_stock_row_if_not_exists(self):
         movement = StockMovementService.ingreso(
@@ -113,10 +85,10 @@ class TestIngreso(TestCase):
 class TestVenta(TestCase):
 
     def setUp(self):
-        self.admin   = make_admin()
-        self.branch  = make_branch()
-        self.product = make_product()
-        make_stock(self.product, self.branch, Decimal("10"))
+        self.admin   = AdminFactory()
+        self.branch  = BranchFactory()
+        self.product = ProductFactory()
+        StockFactory(product=self.product, branch=self.branch, quantity=Decimal("10"))
 
     def test_venta_decrements_stock(self):
         StockMovementService.venta(
@@ -170,11 +142,11 @@ class TestVenta(TestCase):
 class TestTransferencia(TestCase):
 
     def setUp(self):
-        self.admin    = make_admin()
-        self.branch_a = make_branch("Branch A")
-        self.branch_b = make_branch("Branch B")
-        self.product  = make_product()
-        make_stock(self.product, self.branch_a, Decimal("20"))
+        self.admin    = AdminFactory()
+        self.branch_a = BranchFactory()
+        self.branch_b = BranchFactory()
+        self.product  = ProductFactory()
+        StockFactory(product=self.product, branch=self.branch_a, quantity=Decimal("20"))
 
     def test_crear_transferencia_reserves_source_stock(self):
         movement = StockMovementService.crear_transferencia(
@@ -250,10 +222,10 @@ class TestTransferencia(TestCase):
 class TestAjuste(TestCase):
 
     def setUp(self):
-        self.admin   = make_admin()
-        self.branch  = make_branch()
-        self.product = make_product()
-        make_stock(self.product, self.branch, Decimal("10"))
+        self.admin   = AdminFactory()
+        self.branch  = BranchFactory()
+        self.product = ProductFactory()
+        StockFactory(product=self.product, branch=self.branch, quantity=Decimal("10"))
 
     def test_ajuste_sets_absolute_quantity(self):
         movement = StockMovementService.ajuste(
@@ -309,10 +281,10 @@ class TestConcurrentVenta(TransactionTestCase):
     """
 
     def setUp(self):
-        self.admin   = make_admin()
-        self.branch  = make_branch("Concurrent Branch")
-        self.product = make_product(sku="CONC001")
-        make_stock(self.product, self.branch, Decimal("1"))
+        self.admin   = AdminFactory()
+        self.branch  = BranchFactory()
+        self.product = ProductFactory(sku="CONC001")
+        StockFactory(product=self.product, branch=self.branch, quantity=Decimal("1"))
 
     def test_concurrent_sales_dont_go_negative(self):
         results = []
@@ -352,12 +324,12 @@ class TestConcurrentTransfer(TransactionTestCase):
     """
 
     def setUp(self):
-        self.admin    = make_admin()
-        self.branch_a = make_branch("Branch Alpha")
-        self.branch_b = make_branch("Branch Beta")
-        self.product  = make_product(sku="XFER001")
-        make_stock(self.product, self.branch_a, Decimal("10"))
-        make_stock(self.product, self.branch_b, Decimal("10"))
+        self.admin    = AdminFactory()
+        self.branch_a = BranchFactory()
+        self.branch_b = BranchFactory()
+        self.product  = ProductFactory(sku="XFER001")
+        StockFactory(product=self.product, branch=self.branch_a, quantity=Decimal("10"))
+        StockFactory(product=self.product, branch=self.branch_b, quantity=Decimal("10"))
 
     def test_cross_transfers_no_deadlock(self):
         errors = []

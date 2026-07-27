@@ -560,3 +560,290 @@ class StockMovementService:
             product_id, branch_id, quantity, user.email,
         )
         return movement
+
+    @classmethod
+    def revertir(cls, *, movement_id: int, user) -> StockMovement:
+        """
+        REVERSAL — Creates a movement that undoes a confirmed movement.
+        Allowed: Admin only (enforced at the view level).
+
+        Dispatches to a type-specific strategy function via REVERSAL_STRATEGIES.
+        The strategy pattern avoids a monolithic if/elif block and makes adding
+        new movement types in the future a matter of registering one function,
+        not modifying the dispatcher.
+
+        Rules (BUSINESS_RULES §5):
+        - Only CONFIRMED movements can be reversed.
+        - PENDING transfers must be cancelled via cancelar_transferencia,
+          not reversed.
+        - A movement with an existing reversal cannot be reversed again
+          (OneToOne constraint on reverses_movement prevents duplicates at
+          the DB level too, but we validate early for a clear error message).
+        - Reversal movements themselves cannot be reversed (no chains).
+        """
+        try:
+            movement = (
+                StockMovement.objects
+                .select_related("product", "source_branch", "destination_branch")
+                .get(pk=movement_id)
+            )
+        except StockMovement.DoesNotExist:
+            raise InvalidMovementError(f"Movement #{movement_id} not found.")
+
+        # Guard: pending transfers have their own flow
+        if movement.movement_type == MovementType.TRANSFERENCIA and movement.is_pending:
+            raise InvalidMovementError(
+                "Pending transfers must be cancelled via the cancel endpoint, "
+                "not reversed."
+            )
+
+        # Guard: only confirmed movements can be reversed
+        if not movement.is_confirmed:
+            raise InvalidMovementError(
+                "Only confirmed movements can be reversed."
+            )
+
+        # Guard: reversals cannot be chained
+        if movement.movement_type == MovementType.REVERSAL:
+            raise InvalidMovementError(
+                "Reversal movements cannot themselves be reversed."
+            )
+
+        # Guard: already reversed (DB enforces OneToOne but we surface a clear message)
+        if StockMovement.objects.filter(reverses_movement_id=movement.pk).exists():
+            raise InvalidMovementError(
+                f"Movement #{movement_id} has already been reversed."
+            )
+
+        strategy = _REVERSAL_STRATEGIES.get(movement.movement_type)
+        if strategy is None:
+            raise InvalidMovementError(
+                f"No reversal strategy is defined for movement type "
+                f"'{movement.movement_type}'."
+            )
+
+        reversal = strategy(movement, user)
+
+        logger.info(
+            "REVERSAL: original_movement=%s type=%s by=%s",
+            movement_id, movement.movement_type, user.email,
+        )
+        return reversal
+
+
+# ---------------------------------------------------------------------------
+# Reversal helpers — private, called only via _REVERSAL_STRATEGIES
+# ---------------------------------------------------------------------------
+
+def _create_reversal_record(
+    *,
+    original: StockMovement,
+    user,
+    source_branch=None,
+    destination_branch=None,
+    quantity: Decimal,
+    notes: str = "",
+    adjustment_previous_quantity: Decimal = None,
+) -> StockMovement:
+    """
+    Creates the StockMovement record for a reversal.
+    Centralised here so all reversal strategies produce consistent records.
+    """
+    auto_notes = f"Reversal of {original.movement_type} #{original.pk}."
+    return StockMovement.objects.create(
+        movement_type=MovementType.REVERSAL,
+        status=MovementStatus.CONFIRMED,
+        product=original.product,
+        source_branch=source_branch,
+        destination_branch=destination_branch,
+        quantity=quantity,
+        adjustment_previous_quantity=adjustment_previous_quantity,
+        reverses_movement=original,
+        created_by=user,
+        notes=f"{auto_notes} {notes}".strip(),
+    )
+
+
+def _reverse_ingreso(movement: StockMovement, user) -> StockMovement:
+    """
+    Ingreso added stock to destination_branch.
+    Reversal removes that same quantity.
+    Requires: destination_branch stock >= original quantity.
+    """
+    with transaction.atomic():
+        stock = _lock_stock(movement.product_id, movement.destination_branch_id)
+
+        if stock.quantity < movement.quantity:
+            raise InsufficientStockError(
+                f"Cannot reverse entry: insufficient stock at destination branch. "
+                f"Available: {stock.quantity}, required: {movement.quantity}."
+            )
+
+        stock.quantity -= movement.quantity
+        stock.save(update_fields=["quantity", "updated_at"])
+
+        return _create_reversal_record(
+            original=movement,
+            user=user,
+            source_branch=movement.destination_branch,
+            quantity=movement.quantity,
+        )
+
+
+def _reverse_venta(movement: StockMovement, user) -> StockMovement:
+    """
+    Venta removed stock from source_branch.
+    Reversal restores that quantity to the same branch.
+    """
+    with transaction.atomic():
+        stock = _get_or_create_and_lock_stock(
+            movement.product_id, movement.source_branch_id
+        )
+        stock.quantity += movement.quantity
+        stock.save(update_fields=["quantity", "updated_at"])
+
+        return _create_reversal_record(
+            original=movement,
+            user=user,
+            destination_branch=movement.source_branch,
+            quantity=movement.quantity,
+        )
+
+
+def _reverse_transferencia(movement: StockMovement, user) -> StockMovement:
+    """
+    Confirmed transfer moved stock source → destination.
+    Reversal moves it back: destination -= qty, source += qty.
+
+    Locks are acquired in ascending branch_id order (same as the
+    original transfer service) to prevent deadlocks.
+    """
+    with transaction.atomic():
+        source_stock, dest_stock = _lock_two_stocks(
+            movement.product_id,
+            movement.source_branch_id,
+            movement.destination_branch_id,
+        )
+
+        if dest_stock.quantity < movement.quantity:
+            raise InsufficientStockError(
+                f"Cannot reverse transfer: insufficient stock at destination branch. "
+                f"Available: {dest_stock.quantity}, required: {movement.quantity}."
+            )
+
+        dest_stock.quantity   -= movement.quantity
+        source_stock.quantity += movement.quantity
+
+        Stock.objects.bulk_update(
+            [source_stock, dest_stock],
+            ["quantity", "updated_at"],
+        )
+
+        return _create_reversal_record(
+            original=movement,
+            user=user,
+            # Direction is inverted: goods travel back from dest to source
+            source_branch=movement.destination_branch,
+            destination_branch=movement.source_branch,
+            quantity=movement.quantity,
+        )
+
+
+def _reverse_ajuste(movement: StockMovement, user) -> StockMovement:
+    """
+    Ajuste set stock to an absolute value.
+    Reversal restores stock to adjustment_previous_quantity.
+
+    The quantity stored in the reversal record is the delta magnitude
+    so the non-negativity constraint on the movement model is respected
+    even when restoring to zero.
+    """
+    if movement.adjustment_previous_quantity is None:
+        raise InvalidMovementError(
+            "Cannot reverse this adjustment: the previous quantity was not "
+            "recorded at the time of creation."
+        )
+
+    restore_to = movement.adjustment_previous_quantity
+
+    with transaction.atomic():
+        stock = _get_or_create_and_lock_stock(
+            movement.product_id, movement.destination_branch_id
+        )
+        current_quantity = stock.quantity
+
+        stock.quantity = restore_to
+        stock.save(update_fields=["quantity", "updated_at"])
+
+        # Magnitude of the stock change — always > 0 because we guard
+        # against same-quantity adjustments in the ajuste service.
+        delta = abs(current_quantity - restore_to)
+        # Minimum Decimal("0.001") to satisfy the model's MinValueValidator
+        record_quantity = delta if delta > 0 else Decimal("0.001")
+
+        return _create_reversal_record(
+            original=movement,
+            user=user,
+            destination_branch=movement.destination_branch,
+            quantity=record_quantity,
+            adjustment_previous_quantity=current_quantity,
+            notes=f"Restoring stock from {current_quantity} to {restore_to}.",
+        )
+
+
+def _reverse_devolucion(movement: StockMovement, user) -> StockMovement:
+    """
+    Devolucion added stock to destination_branch (the original sale branch).
+    Reversal removes that same quantity.
+    Requires: destination_branch stock >= original quantity.
+    """
+    with transaction.atomic():
+        stock = _lock_stock(movement.product_id, movement.destination_branch_id)
+
+        if stock.quantity < movement.quantity:
+            raise InsufficientStockError(
+                f"Cannot reverse return: insufficient stock at branch. "
+                f"Available: {stock.quantity}, required: {movement.quantity}."
+            )
+
+        stock.quantity -= movement.quantity
+        stock.save(update_fields=["quantity", "updated_at"])
+
+        return _create_reversal_record(
+            original=movement,
+            user=user,
+            source_branch=movement.destination_branch,
+            quantity=movement.quantity,
+        )
+
+
+def _reverse_donacion(movement: StockMovement, user) -> StockMovement:
+    """
+    Donacion removed stock from source_branch.
+    Reversal adds it back (stock is treated as returned from the donation).
+    """
+    with transaction.atomic():
+        stock = _get_or_create_and_lock_stock(
+            movement.product_id, movement.source_branch_id
+        )
+        stock.quantity += movement.quantity
+        stock.save(update_fields=["quantity", "updated_at"])
+
+        return _create_reversal_record(
+            original=movement,
+            user=user,
+            destination_branch=movement.source_branch,
+            quantity=movement.quantity,
+        )
+
+
+# Registered after the functions are defined so each key maps
+# to an already-resolved callable.
+_REVERSAL_STRATEGIES = {
+    MovementType.INGRESO:       _reverse_ingreso,
+    MovementType.VENTA:         _reverse_venta,
+    MovementType.TRANSFERENCIA: _reverse_transferencia,
+    MovementType.AJUSTE:        _reverse_ajuste,
+    MovementType.DEVOLUCION:    _reverse_devolucion,
+    MovementType.DONACION:      _reverse_donacion,
+}

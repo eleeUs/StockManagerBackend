@@ -11,6 +11,7 @@ from .views import (
     AjusteView,
     DevolucionView,
     DonacionView,
+    ReverseMovementView,
 )
 
 urlpatterns = [
@@ -36,6 +37,9 @@ urlpatterns = [
 
     # Transfer — creation + two-step actions
     path("movements/transferencia/",                  TransferenciaView.as_view(),   name="movement-transferencia"),
-    path("movements/transferencia/<int:pk>/confirm/", ConfirmTransferView.as_view(), name="transfer-confirm"),
-    path("movements/transferencia/<int:pk>/cancel/",  CancelTransferView.as_view(),  name="transfer-cancel"),
+    path("movements/transferencia/<int:pk>/confirm/", ConfirmTransferView.as_view(),  name="transfer-confirm"),
+    path("movements/transferencia/<int:pk>/cancel/",  CancelTransferView.as_view(),   name="transfer-cancel"),
+
+    # Reversal — works on any confirmed movement type
+    path("movements/<int:pk>/reverse/",               ReverseMovementView.as_view(),  name="movement-reverse"),
 ]

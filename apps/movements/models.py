@@ -10,6 +10,9 @@ class MovementType(models.TextChoices):
     AJUSTE        = "ajuste",        "Adjustment"
     DEVOLUCION    = "devolucion",    "Return"
     DONACION      = "donacion",      "Donation"
+    # Created exclusively by the reversal service.
+    # Never sent directly by a client — enforced at the view level.
+    REVERSAL      = "reversal",      "Reversal"
 
 
 class MovementStatus(models.TextChoices):

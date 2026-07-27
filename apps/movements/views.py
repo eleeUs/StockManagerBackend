@@ -352,3 +352,54 @@ class DonacionView(APIView):
             notes=d["notes"],
         )
         return Response(StockMovementSerializer(movement).data, status=status.HTTP_201_CREATED)
+
+
+class ReverseMovementView(APIView):
+    """
+    POST /api/v1/movements/{id}/reverse/
+
+    Creates a REVERSAL movement that undoes the stock effect of a
+    confirmed movement. The original movement record is never modified.
+
+    Supported types: ingreso, venta, transferencia (confirmed only),
+    ajuste, devolucion, donacion.
+
+    Pending transfers must be cancelled via the cancel endpoint, not reversed.
+    A movement that has already been reversed cannot be reversed again.
+    """
+    permission_classes = [IsAdmin]
+
+    @extend_schema(
+        tags=["Movements"],
+        summary="Reverse a confirmed movement",
+        description=(
+            "Creates a REVERSAL movement with the opposite stock effect. "
+            "The original movement is never modified. "
+            "Cannot be applied to pending transfers or movements already reversed."
+        ),
+        parameters=[
+            OpenApiParameter(
+                "id", OpenApiTypes.INT, OpenApiParameter.PATH,
+                description="ID of the movement to reverse",
+            )
+        ],
+        request=None,
+        responses={
+            201: StockMovementSerializer,
+            400: OpenApiResponse(
+                description="Movement is pending, already reversed, or insufficient stock to undo"
+            ),
+            403: _UNAUTHORIZED,
+            404: _NOT_FOUND,
+            409: OpenApiResponse(description="Movement has already been reversed"),
+        },
+    )
+    def post(self, request, pk):
+        reversal = StockMovementService.revertir(
+            movement_id=pk,
+            user=request.user,
+        )
+        return Response(
+            StockMovementSerializer(reversal).data,
+            status=status.HTTP_201_CREATED,
+        )
