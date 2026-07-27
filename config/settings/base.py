@@ -96,6 +96,21 @@ DATABASES = {
 AUTH_USER_MODEL = "users.User"
 
 # ---------------------------------------------------------------------------
+# Password hashing
+# ---------------------------------------------------------------------------
+# Primary hasher: Argon2id with explicitly configured parameters.
+# See core/hashers.py for parameter rationale.
+#
+# PBKDF2 is kept as a fallback so that any passwords hashed before the
+# Argon2 migration (e.g. during development) remain valid. Django detects
+# which algorithm was used from the hash prefix and rehashes to Argon2 on
+# the user's next successful login automatically.
+PASSWORD_HASHERS = [
+    "core.hashers.StockArgon2PasswordHasher",
+    "django.contrib.auth.hashers.PBKDF2PasswordHasher",
+]
+
+# ---------------------------------------------------------------------------
 # Password validation
 # ---------------------------------------------------------------------------
 AUTH_PASSWORD_VALIDATORS = [
