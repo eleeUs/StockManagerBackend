@@ -1,0 +1,41 @@
+from django.urls import path
+from .views import (
+    StockListView,
+    StockByBranchView,
+    MovementListView,
+    IngresoView,
+    VentaView,
+    TransferenciaView,
+    ConfirmTransferView,
+    CancelTransferView,
+    AjusteView,
+    DevolucionView,
+    DonacionView,
+)
+
+urlpatterns = [
+    # -----------------------------------------------------------------------
+    # Stock (read-only)
+    # -----------------------------------------------------------------------
+    path("stock/",                                    StockListView.as_view(),      name="stock-list"),
+    path("stock/product/<int:product_id>/by-branch/", StockByBranchView.as_view(),  name="stock-by-branch"),
+
+    # -----------------------------------------------------------------------
+    # Movement history (read-only)
+    # -----------------------------------------------------------------------
+    path("movements/",                                MovementListView.as_view(),    name="movement-list"),
+
+    # -----------------------------------------------------------------------
+    # Movement creation — one endpoint per type
+    # -----------------------------------------------------------------------
+    path("movements/ingreso/",                        IngresoView.as_view(),         name="movement-ingreso"),
+    path("movements/venta/",                          VentaView.as_view(),           name="movement-venta"),
+    path("movements/ajuste/",                         AjusteView.as_view(),          name="movement-ajuste"),
+    path("movements/devolucion/",                     DevolucionView.as_view(),      name="movement-devolucion"),
+    path("movements/donacion/",                       DonacionView.as_view(),        name="movement-donacion"),
+
+    # Transfer — creation + two-step actions
+    path("movements/transferencia/",                  TransferenciaView.as_view(),   name="movement-transferencia"),
+    path("movements/transferencia/<int:pk>/confirm/", ConfirmTransferView.as_view(), name="transfer-confirm"),
+    path("movements/transferencia/<int:pk>/cancel/",  CancelTransferView.as_view(),  name="transfer-cancel"),
+]

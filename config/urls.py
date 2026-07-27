@@ -14,6 +14,9 @@ urlpatterns = [
         path("branches/", include("apps.branches.urls")),
         path("products/", include("apps.products.urls")),
 
+        # Stock & Movements
+        path("", include("apps.movements.urls")),
+
         # OpenAPI schema + Swagger UI (disable in production if needed)
         path("schema/", SpectacularAPIView.as_view(), name="schema"),
         path("docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
