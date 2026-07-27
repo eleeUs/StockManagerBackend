@@ -1,7 +1,7 @@
 from django.urls import path
+
+from apps.stock.views import StockListView, StockByBranchView
 from .views import (
-    StockListView,
-    StockByBranchView,
     MovementListView,
     IngresoView,
     VentaView,
@@ -14,20 +14,20 @@ from .views import (
 )
 
 urlpatterns = [
-    # -----------------------------------------------------------------------
+    # -------------------------------------------------------------------
     # Stock (read-only)
-    # -----------------------------------------------------------------------
+    # -------------------------------------------------------------------
     path("stock/",                                    StockListView.as_view(),      name="stock-list"),
     path("stock/product/<int:product_id>/by-branch/", StockByBranchView.as_view(),  name="stock-by-branch"),
 
-    # -----------------------------------------------------------------------
-    # Movement history (read-only)
-    # -----------------------------------------------------------------------
+    # -------------------------------------------------------------------
+    # Movement history (read-only, cursor-paginated)
+    # -------------------------------------------------------------------
     path("movements/",                                MovementListView.as_view(),    name="movement-list"),
 
-    # -----------------------------------------------------------------------
+    # -------------------------------------------------------------------
     # Movement creation — one endpoint per type
-    # -----------------------------------------------------------------------
+    # -------------------------------------------------------------------
     path("movements/ingreso/",                        IngresoView.as_view(),         name="movement-ingreso"),
     path("movements/venta/",                          VentaView.as_view(),           name="movement-venta"),
     path("movements/ajuste/",                         AjusteView.as_view(),          name="movement-ajuste"),

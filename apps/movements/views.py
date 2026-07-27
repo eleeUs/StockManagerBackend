@@ -1,14 +1,15 @@
+from django.db.models import Q
 from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiParameter, OpenApiTypes
 
-from core.permissions import IsAdmin, IsAdminOrSeller, CanAccessBranch
+from core.mixins import BranchScopeQuerysetMixin
+from core.permissions import IsAdmin, IsAdminOrSeller
 from core.pagination import MovementCursorPagination
-from apps.stock.models import Stock
-from apps.stock.serializers import StockSerializer
 
-from .models import StockMovement, MovementType
+from .models import StockMovement
 from .serializers import (
     StockMovementSerializer,
     IngresoSerializer,
@@ -23,65 +24,44 @@ from .filters import StockMovementFilter
 
 
 # ---------------------------------------------------------------------------
-# Stock (read-only views)
+# Shared schema responses (reused across multiple endpoints)
 # ---------------------------------------------------------------------------
 
-class StockListView(generics.ListAPIView):
-    """
-    GET /api/v1/stock/
-    Current stock levels, filterable by branch and product.
-
-    Sellers see all branches (read-only) per BUSINESS_RULES §1.2.
-    Admins see all stock including for inactive branches.
-    """
-    permission_classes = [IsAuthenticated]
-    serializer_class   = StockSerializer
-    filterset_fields   = ["branch", "product"]
-    search_fields      = ["product__name", "product__sku", "branch__name"]
-
-    def get_queryset(self):
-        return (
-            Stock.objects
-            .select_related("product", "product__category", "branch")
-            .order_by("branch__name", "product__name")
-        )
-
-
-class StockByBranchView(generics.ListAPIView):
-    """
-    GET /api/v1/stock/product/{product_id}/by-branch/
-    Stock levels for a single product across all branches.
-    Useful for admins deciding where to source a transfer.
-    """
-    permission_classes = [IsAuthenticated]
-    serializer_class   = StockSerializer
-
-    def get_queryset(self):
-        return (
-            Stock.objects
-            .filter(product_id=self.kwargs["product_id"])
-            .select_related("product", "branch")
-            .order_by("branch__name")
-        )
+_INSUFFICIENT_STOCK  = OpenApiResponse(description="Insufficient stock at branch (stock < requested quantity)")
+_INVALID_MOVEMENT    = OpenApiResponse(description="Movement violates a business rule")
+_UNAUTHORIZED        = OpenApiResponse(description="User role does not permit this action")
+_NOT_FOUND           = OpenApiResponse(description="Movement not found")
 
 
 # ---------------------------------------------------------------------------
 # Movement history
 # ---------------------------------------------------------------------------
 
-class MovementListView(generics.ListAPIView):
+@extend_schema(tags=["Movements"])
+class MovementListView(BranchScopeQuerysetMixin, generics.ListAPIView):
     """
     GET /api/v1/movements/
-    Paginated, filterable movement history.
 
-    Sellers see movements for their branch only.
-    Admins see all movements.
+    Paginated, cursor-based movement history.
+    Supports filtering by date range, type, status, product, and branch.
+
+    Scope:
+    - Admins see all movements across all branches.
+    - Sellers see only movements where their branch is source OR destination.
+      This includes inbound transfers so sellers can track incoming stock.
     """
-    permission_classes  = [IsAuthenticated]
-    serializer_class    = StockMovementSerializer
-    filterset_class     = StockMovementFilter
-    pagination_class    = MovementCursorPagination
-    ordering_fields     = ["created_at"]
+    permission_classes = [IsAuthenticated]
+    serializer_class   = StockMovementSerializer
+    filterset_class    = StockMovementFilter
+    pagination_class   = MovementCursorPagination
+
+    def get_branch_q(self, user) -> Q:
+        # Sellers see movements from/to their branch (OR condition).
+        # This overrides the mixin default which only handles a single field.
+        return (
+            Q(source_branch=user.branch) |
+            Q(destination_branch=user.branch)
+        )
 
     def get_queryset(self):
         qs = (
@@ -92,27 +72,32 @@ class MovementListView(generics.ListAPIView):
                 "destination_branch",
                 "created_by",
             )
-            .order_by("-created_at")
+            .order_by("-created_at", "id")
         )
         user = self.request.user
         if user.is_seller:
-            # Sellers see movements where their branch is source or destination
-            from django.db.models import Q
-            qs = qs.filter(
-                Q(source_branch=user.branch) |
-                Q(destination_branch=user.branch)
-            )
+            qs = qs.filter(self.get_branch_q(user))
         return qs
 
 
 # ---------------------------------------------------------------------------
-# Movement creation endpoints — one view per type
+# Movement creation endpoints
 # ---------------------------------------------------------------------------
 
 class IngresoView(APIView):
-    """POST /api/v1/movements/ingreso/ — Admin only"""
+    """POST /api/v1/movements/ingreso/"""
     permission_classes = [IsAdmin]
 
+    @extend_schema(
+        tags=["Movements"],
+        summary="Register a stock entry",
+        request=IngresoSerializer,
+        responses={
+            201: StockMovementSerializer,
+            400: _INVALID_MOVEMENT,
+            403: _UNAUTHORIZED,
+        },
+    )
     def post(self, request):
         serializer = IngresoSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -126,31 +111,41 @@ class IngresoView(APIView):
             user=request.user,
             notes=d["notes"],
         )
-        return Response(
-            StockMovementSerializer(movement).data,
-            status=status.HTTP_201_CREATED,
-        )
+        return Response(StockMovementSerializer(movement).data, status=status.HTTP_201_CREATED)
 
 
 class VentaView(APIView):
     """
     POST /api/v1/movements/venta/
-    Allowed: Admin or Seller.
-    Sellers are restricted to their assigned branch (enforced here).
+
+    Sellers are restricted to their assigned branch.
+    Admins can sell from any branch.
     """
     permission_classes = [IsAdminOrSeller]
 
+    @extend_schema(
+        tags=["Movements"],
+        summary="Register a sale",
+        request=VentaSerializer,
+        responses={
+            201: StockMovementSerializer,
+            400: _INSUFFICIENT_STOCK,
+            403: OpenApiResponse(
+                description="Seller attempting to sell from a branch other than their own"
+            ),
+        },
+    )
     def post(self, request):
         serializer = VentaSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         d = serializer.validated_data
 
-        # Sellers can only sell from their assigned branch
+        # Sellers are restricted to their assigned branch (BUSINESS_RULES §1.2)
         if request.user.is_seller and d["branch"] != request.user.branch:
             return Response(
                 {
                     "error": "unauthorized_movement",
-                    "detail": "Sellers can only sell from their assigned branch.",
+                    "detail": "Sellers can only register sales from their assigned branch.",
                 },
                 status=status.HTTP_403_FORBIDDEN,
             )
@@ -162,16 +157,30 @@ class VentaView(APIView):
             user=request.user,
             notes=d["notes"],
         )
-        return Response(
-            StockMovementSerializer(movement).data,
-            status=status.HTTP_201_CREATED,
-        )
+        return Response(StockMovementSerializer(movement).data, status=status.HTTP_201_CREATED)
 
 
 class TransferenciaView(APIView):
-    """POST /api/v1/movements/transferencia/ — Admin only"""
+    """POST /api/v1/movements/transferencia/"""
     permission_classes = [IsAdmin]
 
+    @extend_schema(
+        tags=["Movements - Transfers"],
+        summary="Create a pending transfer between branches (step 1 of 2)",
+        description=(
+            "Creates a transfer in PENDING status. "
+            "Source stock is decremented immediately to reserve the quantity. "
+            "The transfer must be confirmed or cancelled explicitly."
+        ),
+        request=TransferenciaSerializer,
+        responses={
+            201: StockMovementSerializer,
+            400: OpenApiResponse(
+                description="Insufficient stock at source, same source/destination, or invalid quantity"
+            ),
+            403: _UNAUTHORIZED,
+        },
+    )
     def post(self, request):
         serializer = TransferenciaSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -185,46 +194,84 @@ class TransferenciaView(APIView):
             user=request.user,
             notes=d["notes"],
         )
-        return Response(
-            StockMovementSerializer(movement).data,
-            status=status.HTTP_201_CREATED,
-        )
+        return Response(StockMovementSerializer(movement).data, status=status.HTTP_201_CREATED)
 
 
 class ConfirmTransferView(APIView):
-    """POST /api/v1/movements/transferencia/{id}/confirm/ — Admin only"""
+    """POST /api/v1/movements/transferencia/{id}/confirm/"""
     permission_classes = [IsAdmin]
 
+    @extend_schema(
+        tags=["Movements - Transfers"],
+        summary="Confirm a pending transfer (step 2 of 2)",
+        description="Adds stock to the destination branch. Cannot be undone — create a reversal instead.",
+        parameters=[
+            OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH, description="Transfer movement ID")
+        ],
+        request=None,
+        responses={
+            200: StockMovementSerializer,
+            400: _INVALID_MOVEMENT,
+            403: _UNAUTHORIZED,
+            404: _NOT_FOUND,
+            409: OpenApiResponse(description="Transfer already confirmed"),
+        },
+    )
     def post(self, request, pk):
         movement = StockMovementService.confirmar_transferencia(
             movement_id=pk,
             user=request.user,
         )
-        return Response(
-            StockMovementSerializer(movement).data,
-            status=status.HTTP_200_OK,
-        )
+        return Response(StockMovementSerializer(movement).data, status=status.HTTP_200_OK)
 
 
 class CancelTransferView(APIView):
-    """POST /api/v1/movements/transferencia/{id}/cancel/ — Admin only"""
+    """POST /api/v1/movements/transferencia/{id}/cancel/"""
     permission_classes = [IsAdmin]
 
+    @extend_schema(
+        tags=["Movements - Transfers"],
+        summary="Cancel a pending transfer",
+        description="Restores stock to the source branch. Only works on PENDING transfers.",
+        parameters=[
+            OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH, description="Transfer movement ID")
+        ],
+        request=None,
+        responses={
+            200: StockMovementSerializer,
+            400: _INVALID_MOVEMENT,
+            403: _UNAUTHORIZED,
+            404: _NOT_FOUND,
+            409: OpenApiResponse(description="Cannot cancel a confirmed transfer"),
+        },
+    )
     def post(self, request, pk):
         movement = StockMovementService.cancelar_transferencia(
             movement_id=pk,
             user=request.user,
         )
-        return Response(
-            StockMovementSerializer(movement).data,
-            status=status.HTTP_200_OK,
-        )
+        return Response(StockMovementSerializer(movement).data, status=status.HTTP_200_OK)
 
 
 class AjusteView(APIView):
-    """POST /api/v1/movements/ajuste/ — Admin only"""
+    """POST /api/v1/movements/ajuste/"""
     permission_classes = [IsAdmin]
 
+    @extend_schema(
+        tags=["Movements"],
+        summary="Adjust stock to an absolute value",
+        description=(
+            "Sets stock at a branch to new_quantity (absolute value, not a delta). "
+            "Intended for physical inventory corrections. "
+            "To add stock formally, use the ingreso endpoint instead."
+        ),
+        request=AjusteSerializer,
+        responses={
+            201: StockMovementSerializer,
+            400: _INVALID_MOVEMENT,
+            403: _UNAUTHORIZED,
+        },
+    )
     def post(self, request):
         serializer = AjusteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -237,16 +284,29 @@ class AjusteView(APIView):
             user=request.user,
             notes=d["notes"],
         )
-        return Response(
-            StockMovementSerializer(movement).data,
-            status=status.HTTP_201_CREATED,
-        )
+        return Response(StockMovementSerializer(movement).data, status=status.HTTP_201_CREATED)
 
 
 class DevolucionView(APIView):
-    """POST /api/v1/movements/devolucion/ — Admin only"""
+    """POST /api/v1/movements/devolucion/"""
     permission_classes = [IsAdmin]
 
+    @extend_schema(
+        tags=["Movements"],
+        summary="Register a product return",
+        description=(
+            "Returns stock to the same branch where the original sale occurred. "
+            "Referencing the original_movement is optional but strongly recommended for audit."
+        ),
+        request=DevolucionSerializer,
+        responses={
+            201: StockMovementSerializer,
+            400: OpenApiResponse(
+                description="Return quantity exceeds original sale or branch mismatch"
+            ),
+            403: _UNAUTHORIZED,
+        },
+    )
     def post(self, request):
         serializer = DevolucionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -262,16 +322,23 @@ class DevolucionView(APIView):
                 d["original_movement"].id if d.get("original_movement") else None
             ),
         )
-        return Response(
-            StockMovementSerializer(movement).data,
-            status=status.HTTP_201_CREATED,
-        )
+        return Response(StockMovementSerializer(movement).data, status=status.HTTP_201_CREATED)
 
 
 class DonacionView(APIView):
-    """POST /api/v1/movements/donacion/ — Admin only"""
+    """POST /api/v1/movements/donacion/"""
     permission_classes = [IsAdmin]
 
+    @extend_schema(
+        tags=["Movements"],
+        summary="Register a stock donation",
+        request=DonacionSerializer,
+        responses={
+            201: StockMovementSerializer,
+            400: _INSUFFICIENT_STOCK,
+            403: _UNAUTHORIZED,
+        },
+    )
     def post(self, request):
         serializer = DonacionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -284,7 +351,4 @@ class DonacionView(APIView):
             user=request.user,
             notes=d["notes"],
         )
-        return Response(
-            StockMovementSerializer(movement).data,
-            status=status.HTTP_201_CREATED,
-        )
+        return Response(StockMovementSerializer(movement).data, status=status.HTTP_201_CREATED)
