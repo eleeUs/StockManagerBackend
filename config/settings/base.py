@@ -37,6 +37,7 @@ THIRD_PARTY_APPS = [
     "rest_framework_simplejwt.token_blacklist",
     "django_filters",
     "drf_spectacular",
+    "corsheaders",
 ]
 
 LOCAL_APPS = [
@@ -54,7 +55,12 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 # ---------------------------------------------------------------------------
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # RequestIDMiddleware must be early so all subsequent middleware
+    # and views have access to request.request_id
+    "core.middleware.RequestIDMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
+    # CorsMiddleware must sit before CommonMiddleware (django-cors-headers requirement)
+    "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
@@ -144,7 +150,6 @@ REST_FRAMEWORK = {
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": (
-        # Every endpoint requires authentication unless explicitly overridden
         "rest_framework.permissions.IsAuthenticated",
     ),
     "DEFAULT_FILTER_BACKENDS": (
@@ -156,6 +161,25 @@ REST_FRAMEWORK = {
     "PAGE_SIZE": 20,
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "EXCEPTION_HANDLER": "core.exceptions.custom_exception_handler",
+    # ---------------------------------------------------------------------------
+    # Throttling
+    # Global rates apply to all endpoints except those with explicit
+    # throttle_classes (e.g. LoginView uses LoginRateThrottle at 5/min).
+    # ---------------------------------------------------------------------------
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        # Unauthenticated requests to non-login endpoints (e.g. schema, health)
+        "anon":  "20/minute",
+        # Authenticated API usage — covers all business endpoints
+        "user":  "200/minute",
+        # Login attempts — per IP, applied only on LoginView
+        # 5/min × 60min × 24h = 7,200 attempts/day max per IP
+        # Combined with Argon2 (~100ms/attempt), brute-force is infeasible
+        "login": "5/minute",
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -182,14 +206,29 @@ SPECTACULAR_SETTINGS = {
 }
 
 # ---------------------------------------------------------------------------
+# CORS (django-cors-headers)
+# Fail-safe default: no cross-origin requests allowed unless an environment
+# explicitly opts in. development.py opens it up; production.py reads an
+# explicit allow-list from the environment.
+# ---------------------------------------------------------------------------
+CORS_ALLOW_ALL_ORIGINS = False
+CORS_ALLOWED_ORIGINS = []
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
+    "filters": {
+        # Injects request_id into every log record produced during a request
+        "request_id": {
+            "()": "core.middleware.RequestIDFilter",
+        },
+    },
     "formatters": {
         "verbose": {
-            "format": "{levelname} {asctime} {module} {process:d} {thread:d} {message}",
+            "format": "{levelname} {asctime} {module} [req={request_id}] {message}",
             "style": "{",
         },
     },
@@ -197,6 +236,7 @@ LOGGING = {
         "console": {
             "class": "logging.StreamHandler",
             "formatter": "verbose",
+            "filters": ["request_id"],
         },
     },
     "root": {

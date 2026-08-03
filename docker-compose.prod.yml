@@ -1,0 +1,17 @@
+version: "3.9"
+
+# Production overrides for docker-compose.yml
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up
+
+services:
+  api:
+    build:
+      context: .
+      args:
+        REQUIREMENTS: production
+    command: >
+      gunicorn config.wsgi:application
+      --config gunicorn.conf.py
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.production
+    restart: always

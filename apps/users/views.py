@@ -7,8 +7,14 @@ from rest_framework.response import Response
 from rest_framework import status
 
 from core.permissions import IsAdmin
+from core.views import LoginRateThrottle
 from .models import User
-from .serializers import UserSerializer, CreateUserSerializer, UpdateUserSerializer
+from .serializers import (
+    UserSerializer,
+    CreateUserSerializer,
+    UpdateUserSerializer,
+    ChangePasswordSerializer,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -19,9 +25,10 @@ class LoginView(TokenObtainPairView):
     """
     POST /api/v1/auth/login/
     Returns access and refresh JWT tokens.
-    No authentication required.
+    Throttled to 5 attempts per minute per IP (LoginRateThrottle).
     """
     permission_classes = []
+    throttle_classes   = [LoginRateThrottle]
 
 
 class RefreshTokenView(TokenRefreshView):
@@ -115,3 +122,27 @@ class MeView(generics.RetrieveAPIView):
 
     def get_object(self):
         return self.request.user
+
+
+class ChangePasswordView(APIView):
+    """
+    POST /api/v1/auth/change-password/
+
+    Allows any authenticated user to change their own password.
+    Requires the current password for verification — this prevents
+    a stolen session token from being used to lock out the real user.
+
+    On success the response is 204 No Content. The client should
+    discard existing tokens and prompt the user to log in again,
+    because token rotation is not automatic on password change.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = ChangePasswordSerializer(
+            data=request.data,
+            context={"request": request},
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(status=status.HTTP_204_NO_CONTENT)

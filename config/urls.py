@@ -1,9 +1,13 @@
 from django.contrib import admin
 from django.urls import path, include
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
+from core.views import HealthCheckView
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+
+    # Health check — no auth, used by Docker and load balancers
+    path("health/", HealthCheckView.as_view(), name="health-check"),
 
     # API v1
     path("api/v1/", include([
@@ -17,8 +21,11 @@ urlpatterns = [
         # Stock & Movements
         path("", include("apps.movements.urls")),
 
-        # OpenAPI schema + Swagger UI (disable in production if needed)
-        path("schema/", SpectacularAPIView.as_view(), name="schema"),
-        path("docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
+        # Reports (read-only aggregations; models-less app)
+        path("reports/", include("apps.reports.urls")),
+
+        # OpenAPI schema + Swagger UI
+        path("schema/", SpectacularAPIView.as_view(),                             name="schema"),
+        path("docs/",   SpectacularSwaggerView.as_view(url_name="schema"),        name="swagger-ui"),
     ])),
 ]
