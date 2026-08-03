@@ -83,6 +83,17 @@ class StockMovement(models.Model):
         related_name="incoming_movements",
     )
 
+    # Populated only for INGRESO movements. Optional even then — not every
+    # entry has a formal supplier on file. Enforced at the DB level via
+    # movement_supplier_only_for_ingreso: any other movement type storing
+    # a supplier is a bug, not a valid state (BUSINESS_RULES §10).
+    supplier = models.ForeignKey(
+        "suppliers.Supplier",
+        null=True, blank=True,
+        on_delete=models.PROTECT,
+        related_name="movements",
+    )
+
     # Always positive — the magnitude of this movement
     quantity = models.DecimalField(
         max_digits=12,
@@ -174,6 +185,15 @@ class StockMovement(models.Model):
                     destination_branch__isnull=False,
                 ),
                 name="movement_source_dest_different",
+            ),
+            # supplier is only meaningful on an entry (ingreso) record —
+            # any other movement type storing a supplier is invalid data.
+            models.CheckConstraint(
+                check=(
+                    models.Q(supplier__isnull=True) |
+                    models.Q(movement_type="ingreso")
+                ),
+                name="movement_supplier_only_for_ingreso",
             ),
         ]
 

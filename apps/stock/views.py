@@ -1,10 +1,13 @@
-from rest_framework import generics
+from rest_framework import generics, status
+from rest_framework.views import APIView
+from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes
 
 from core.mixins import BranchScopeQuerysetMixin
+from core.permissions import IsAdmin
 from .models import Stock
-from .serializers import StockSerializer
+from .serializers import StockSerializer, StockReorderPointUpdateSerializer
 
 
 @extend_schema(tags=["Stock"])
@@ -70,3 +73,41 @@ class StockByBranchView(generics.ListAPIView):
             .select_related("product", "branch")
             .order_by("branch__name")
         )
+
+
+@extend_schema(
+    tags=["Stock"],
+    summary="Set or clear the low-stock alert threshold for a stock row",
+    request=StockReorderPointUpdateSerializer,
+    responses={200: StockSerializer},
+    parameters=[
+        OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH, description="Stock row id"),
+    ],
+)
+class StockReorderPointView(APIView):
+    """
+    PATCH /api/v1/stock/{id}/reorder-point/
+
+    Admin only. Updates ONLY reorder_point — quantity is never reachable
+    from this endpoint. Setting reorder_point to null clears the alert
+    for this (product, branch) row; check_low_stock (BUSINESS_RULES §11)
+    then skips it entirely rather than falling back to a global default.
+    """
+    permission_classes = [IsAdmin]
+
+    def patch(self, request, id):
+        try:
+            stock = Stock.objects.select_related("product", "branch").get(pk=id)
+        except Stock.DoesNotExist:
+            return Response(
+                {"error": "not_found", "detail": f"Stock row #{id} not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = StockReorderPointUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        stock.reorder_point = serializer.validated_data["reorder_point"]
+        stock.save(update_fields=["reorder_point", "updated_at"])
+
+        return Response(StockSerializer(stock).data, status=status.HTTP_200_OK)

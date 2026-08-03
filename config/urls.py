@@ -17,6 +17,7 @@ urlpatterns = [
         # Resources
         path("branches/", include("apps.branches.urls")),
         path("products/", include("apps.products.urls")),
+        path("suppliers/", include("apps.suppliers.urls")),
 
         # Stock & Movements
         path("", include("apps.movements.urls")),

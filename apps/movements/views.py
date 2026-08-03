@@ -110,6 +110,7 @@ class IngresoView(APIView):
             entry_date=d["entry_date"],
             user=request.user,
             notes=d["notes"],
+            supplier_id=d["supplier"].id if d["supplier"] else None,
         )
         return Response(StockMovementSerializer(movement).data, status=status.HTTP_201_CREATED)
 

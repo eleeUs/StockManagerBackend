@@ -478,3 +478,115 @@ build: convert Dockerfile to a multi-stage build
 - ARG REQUIREMENTS=development redeclared in both stages (Docker scopes
   build args per stage)
 ```
+
+---
+
+## Phase 7 — Valorización, Proveedores y Alertas de Stock
+
+```
+feat(products): add cost_price and sale_price to Product
+
+- Both nullable DecimalField(max_digits=12, decimal_places=2),
+  MinValueValidator(0) — not every product has pricing loaded on day one
+- cost_price stripped from ProductSerializer.to_representation() for
+  sellers (margin-sensitive data); sale_price stays visible to both roles
+- Restriction applies automatically to every call site (list, detail),
+  not only a single endpoint
+```
+
+```
+feat(suppliers): add apps/suppliers with Supplier CRUD
+
+- Model: name (unique), contact_name, contact_email, contact_phone,
+  is_active, timestamps
+- List/detail views mirror apps/branches: both roles can list (sellers
+  see active only), admin-only create/update
+- Never hard-deleted — deactivate via is_active=False, PROTECT on FK
+  from StockMovement.supplier enforces this at the DB level
+- Registered in INSTALLED_APPS (has real state/migrations, unlike the
+  models-less apps/reports from Phase 6)
+- Registered at /api/v1/suppliers/ in config/urls.py
+```
+
+```
+feat(movements): add optional supplier FK to StockMovement, ingreso only
+
+- supplier FK nullable, PROTECT on_delete
+- movement_supplier_only_for_ingreso CheckConstraint: any movement type
+  other than ingreso storing a supplier is invalid at the DB level
+- IngresoSerializer accepts optional supplier; StockMovementService.ingreso
+  accepts supplier_id; IngresoView passes it through
+- StockMovementSerializer (read) exposes supplier + supplier_name
+```
+
+```
+feat(stock): add reorder_point to Stock, per (product, branch) row
+
+- Nullable DecimalField — null means no alert configured for this row,
+  not "use a global default"
+- Deliberately per-row, not a system-wide setting: demand for the same
+  product legitimately differs by branch
+- PATCH /api/v1/stock/{id}/reorder-point/ (admin only) touches only this
+  field via a narrow serializer — quantity remains reachable exclusively
+  through StockMovementService, this endpoint doesn't widen that boundary
+```
+
+```
+feat(stock): add check_low_stock management command
+
+- Scans Stock rows with reorder_point set where quantity <= reorder_point
+- Logs each match and prints a summary; --webhook-url POSTs a JSON
+  payload via urllib.request (stdlib) — no new dependency added
+- Designed for external scheduling (cron, k8s CronJob); project has no
+  task queue by design (phase6_prompt.md constraint)
+```
+
+```
+feat(reports): add GET /reports/stock/valuation/
+
+- Admin only, same rationale as cost_price itself being admin-only
+- quantity * cost_price aggregated by branch and by product via
+  ExpressionWrapper + Sum at the DB level
+- Rows with no cost_price are excluded from the total, never treated as
+  worth zero — products_missing_cost_price reports how many are missing
+  so the total's completeness is never ambiguous
+```
+
+```
+test: add Phase 7 coverage across suppliers, stock, products, movements, reports
+
+- apps/suppliers/tests/test_suppliers.py: CRUD + permission tests
+- apps/stock/tests/test_reorder_point.py: admin-only, never touches
+  quantity, null clears the alert, negative value rejected
+- apps/stock/tests/test_check_low_stock.py: command output, rows without
+  reorder_point skipped, webhook payload shape (mocked urlopen)
+- apps/products/tests/test_pricing.py: cost_price hidden from sellers in
+  both list and detail, sale_price always visible, negative price rejected
+- apps/movements/tests/test_supplier_ingreso.py: service accepts
+  supplier_id, DB constraint rejects supplier on non-ingreso movements,
+  endpoint round-trip with and without supplier
+- apps/reports/tests/test_reports.py: TestStockValuationReport — total
+  valuation, missing-cost-price exclusion and count, branch filter,
+  by_branch/by_product breakdown shape
+- tests/factories.py: add SupplierFactory, ProductFactory now sets
+  cost_price/sale_price defaults
+```
+
+```
+chore(seed): add suppliers and per-product pricing to seed_dev_data
+
+- New SUPPLIERS list seeded via get_or_create, same idempotent pattern
+  as the rest of the command
+- PRODUCTS entries now include cost_price/sale_price so the valuation
+  report has real data to show against a fresh seed
+```
+
+```
+fix(test): replace undefined make_stock() call with StockFactory
+
+- test_ingreso_adds_to_existing_stock referenced make_stock(...), a
+  helper removed in the Phase 4 factory_boy refactor that missed this
+  call site — StockFactory was already imported in the same file
+- Pre-existing bug, unrelated to Phase 7 scope; fixed in passing since
+  it broke test collection for this file
+```

@@ -20,6 +20,7 @@ from decimal import Decimal
 
 from apps.branches.models import Branch
 from apps.products.models import Category, Product
+from apps.suppliers.models import Supplier
 from apps.users.models import User
 from apps.stock.models import Stock
 from apps.movements.models import StockMovement, MovementType, MovementStatus
@@ -50,11 +51,13 @@ class CategoryFactory(DjangoModelFactory):
 
 
 class ProductFactory(DjangoModelFactory):
-    sku       = factory.Sequence(lambda n: f"SKU{n:04d}")
-    name      = factory.Sequence(lambda n: f"Product {n}")
-    category  = factory.SubFactory(CategoryFactory)
-    unit_type = "unit"
-    is_active = True
+    sku         = factory.Sequence(lambda n: f"SKU{n:04d}")
+    name        = factory.Sequence(lambda n: f"Product {n}")
+    category    = factory.SubFactory(CategoryFactory)
+    unit_type   = "unit"
+    cost_price  = Decimal("10.00")
+    sale_price  = Decimal("15.00")
+    is_active   = True
 
     class Meta:
         model = Product
@@ -63,6 +66,21 @@ class ProductFactory(DjangoModelFactory):
 class WeightProductFactory(ProductFactory):
     """Product measured in weight units (kg/g)."""
     unit_type = "weight"
+
+
+# ---------------------------------------------------------------------------
+# Supplier
+# ---------------------------------------------------------------------------
+
+class SupplierFactory(DjangoModelFactory):
+    name          = factory.Sequence(lambda n: f"Supplier {n}")
+    contact_name  = factory.Faker("name")
+    contact_email = factory.Faker("company_email")
+    contact_phone = factory.Faker("phone_number")
+    is_active     = True
+
+    class Meta:
+        model = Supplier
 
 
 # ---------------------------------------------------------------------------

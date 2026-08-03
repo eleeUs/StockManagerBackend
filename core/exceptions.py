@@ -57,6 +57,36 @@ class ReturnExceedsSoldQuantityError(StockDomainError):
 
 
 # ---------------------------------------------------------------------------
+# Idempotency exceptions
+# Deliberately NOT part of the StockDomainError hierarchy — these are a
+# cross-cutting HTTP/request concern, not a stock business rule. See
+# docs/phase8_prompt.md Part 1 for the full design rationale.
+# ---------------------------------------------------------------------------
+
+class IdempotencyError(Exception):
+    """Base for all idempotency-layer exceptions."""
+    pass
+
+
+class IdempotencyKeyRequiredError(IdempotencyError):
+    """
+    Raised when Idempotency-Key is required (IDEMPOTENCY_KEY_REQUIRED
+    setting) and missing from the request. → HTTP 400.
+    """
+    pass
+
+
+class IdempotencyKeyConflictError(IdempotencyError):
+    """
+    Raised when an Idempotency-Key is reused with a request body that
+    doesn't match the one it was first used with. Never silently replay
+    a cached response in this case — that would return a result for a
+    different logical request than the one the client just sent. → HTTP 409.
+    """
+    pass
+
+
+# ---------------------------------------------------------------------------
 # DRF exception handler
 # Maps domain exceptions to structured HTTP error responses.
 # Registered in settings: REST_FRAMEWORK["EXCEPTION_HANDLER"]
@@ -68,6 +98,8 @@ _DOMAIN_EXCEPTION_MAP = {
     UnauthorizedMovementError: (status.HTTP_403_FORBIDDEN, "unauthorized_movement"),
     TransferAlreadyConfirmedError: (status.HTTP_409_CONFLICT, "transfer_already_confirmed"),
     ReturnExceedsSoldQuantityError: (status.HTTP_400_BAD_REQUEST, "return_exceeds_sold_quantity"),
+    IdempotencyKeyRequiredError: (status.HTTP_400_BAD_REQUEST, "idempotency_key_required"),
+    IdempotencyKeyConflictError: (status.HTTP_409_CONFLICT, "idempotency_key_conflict"),
 }
 
 

@@ -7,8 +7,9 @@ and is intentionally NOT registered in INSTALLED_APPS (no migrations
 are needed for a models-less app).
 """
 from datetime import date as date_cls
+from decimal import Decimal
 
-from django.db.models import Count, Sum, Q
+from django.db.models import Count, Sum, Q, F, DecimalField, ExpressionWrapper
 from django.db.models.functions import TruncDate
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
@@ -27,7 +28,11 @@ from apps.stock.serializers import StockSerializer
 from apps.branches.models import Branch
 from apps.movements.models import StockMovement
 
-from .serializers import MovementSummarySerializer, BranchActivitySerializer
+from .serializers import (
+    MovementSummarySerializer,
+    BranchActivitySerializer,
+    StockValuationSerializer,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -252,3 +257,96 @@ class BranchActivityReportView(APIView):
             "daily_breakdown": daily_breakdown,
         }
         return Response(BranchActivitySerializer(payload).data, status=status.HTTP_200_OK)
+
+
+# ---------------------------------------------------------------------------
+# A4 — Stock valuation report (Phase 7)
+# ---------------------------------------------------------------------------
+
+@extend_schema(
+    tags=["Reports"],
+    summary="Inventory valuation by branch and by product",
+    parameters=[
+        OpenApiParameter(
+            "branch", OpenApiTypes.INT, OpenApiParameter.QUERY,
+            description="Optional branch id filter.",
+        ),
+    ],
+    request=None,
+    responses={200: StockValuationSerializer, 403: None},
+)
+class StockValuationReportView(APIView):
+    """
+    GET /api/v1/reports/stock/valuation/
+
+    Total inventory value (quantity * product.cost_price), broken down
+    by branch and by product. Admin only — cost_price is margin-sensitive
+    data that sellers never see (apps/products/serializers.py), so a
+    valuation built on top of it is equally restricted.
+
+    Stock rows for products with no cost_price set are excluded from the
+    sums rather than treated as worth zero — products_missing_cost_price
+    tells the caller how many distinct products are missing that data,
+    so the total isn't silently understated without a signal.
+    """
+    permission_classes = [IsAdmin]
+
+    def get(self, request):
+        branch_id = request.query_params.get("branch")
+
+        qs = Stock.objects.select_related("product", "branch")
+        if branch_id:
+            qs = qs.filter(branch_id=branch_id)
+
+        priced_qs = qs.filter(product__cost_price__isnull=False).annotate(
+            value=ExpressionWrapper(
+                F("quantity") * F("product__cost_price"),
+                output_field=DecimalField(max_digits=16, decimal_places=3),
+            )
+        )
+
+        missing_count = (
+            qs.filter(product__cost_price__isnull=True)
+            .values("product_id")
+            .distinct()
+            .count()
+        )
+
+        total_valuation = priced_qs.aggregate(total=Sum("value"))["total"]
+
+        by_branch = [
+            {
+                "branch_id":   row["branch_id"],
+                "branch_name": row["branch__name"],
+                "valuation":   row["valuation"],
+            }
+            for row in (
+                priced_qs.values("branch_id", "branch__name")
+                .annotate(valuation=Sum("value"))
+                .order_by("branch__name")
+            )
+        ]
+
+        by_product = [
+            {
+                "product_id": row["product_id"],
+                "sku":        row["product__sku"],
+                "name":       row["product__name"],
+                "quantity":   row["quantity"],
+                "valuation":  row["valuation"],
+            }
+            for row in (
+                priced_qs.values("product_id", "product__sku", "product__name")
+                .annotate(quantity=Sum("quantity"), valuation=Sum("value"))
+                .order_by("product__name")
+            )
+        ]
+
+        payload = {
+            "branch":                      int(branch_id) if branch_id else None,
+            "total_valuation":             total_valuation or Decimal("0.000"),
+            "products_missing_cost_price": missing_count,
+            "by_branch":                   by_branch,
+            "by_product":                  by_product,
+        }
+        return Response(StockValuationSerializer(payload).data, status=status.HTTP_200_OK)

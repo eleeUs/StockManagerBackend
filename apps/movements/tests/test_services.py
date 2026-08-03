@@ -56,7 +56,7 @@ class TestIngreso(TestCase):
         assert movement.status == MovementStatus.CONFIRMED
 
     def test_ingreso_adds_to_existing_stock(self):
-        make_stock(self.product, self.branch, Decimal("5"))
+        StockFactory(product=self.product, branch=self.branch, quantity=Decimal("5"))
         StockMovementService.ingreso(
             product_id=self.product.id,
             branch_id=self.branch.id,

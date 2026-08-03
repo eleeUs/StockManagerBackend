@@ -19,6 +19,29 @@ class StockSerializer(serializers.ModelSerializer):
             "branch",
             "branch_name",
             "quantity",
+            "reorder_point",
             "updated_at",
         ]
         read_only_fields = fields
+
+
+class StockReorderPointUpdateSerializer(serializers.Serializer):
+    """
+    POST/PATCH body for updating a single Stock row's reorder_point.
+
+    Deliberately a plain Serializer, not ModelSerializer.update() against
+    the full Stock model — this endpoint must only ever be able to touch
+    reorder_point. quantity remains reachable exclusively through
+    StockMovementService, per the "views never touch Stock directly for
+    mutations" convention; reorder_point is metadata, not a stock
+    mutation, so a narrow dedicated serializer is the safest way to allow
+    it without widening that door.
+    """
+    reorder_point = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=3,
+        min_value=0,
+        allow_null=True,
+        required=True,
+        help_text="Null clears the alert threshold for this row.",
+    )

@@ -151,12 +151,17 @@ class StockMovementService:
         entry_date,
         user,
         notes: str = "",
+        supplier_id: int = None,
     ) -> StockMovement:
         """
         INGRESO — Adds stock to a branch.
         Allowed: Admin only (enforced at the view level).
         Stock effect: +quantity at destination branch.
         Creates the stock row if it does not yet exist.
+        supplier_id is optional — not every entry has a supplier on file
+        (BUSINESS_RULES §10). The DB constraint
+        movement_supplier_only_for_ingreso guards against it ever being
+        set on any other movement type.
         """
         if quantity <= 0:
             raise InvalidMovementError("Quantity must be greater than zero.")
@@ -173,6 +178,7 @@ class StockMovementService:
                 destination_branch_id=branch_id,
                 quantity=quantity,
                 entry_date=entry_date,
+                supplier_id=supplier_id,
                 created_by=user,
                 notes=notes,
             )

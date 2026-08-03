@@ -3,6 +3,7 @@ from rest_framework import serializers
 
 from apps.products.models import Product
 from apps.branches.models import Branch
+from apps.suppliers.models import Supplier
 from .models import StockMovement, MovementType, MovementStatus
 
 
@@ -19,6 +20,7 @@ class StockMovementSerializer(serializers.ModelSerializer):
     product_sku          = serializers.CharField(source="product.sku",                     read_only=True)
     source_branch_name   = serializers.CharField(source="source_branch.name",              read_only=True)
     destination_branch_name = serializers.CharField(source="destination_branch.name",      read_only=True)
+    supplier_name        = serializers.CharField(source="supplier.name",                   read_only=True)
     created_by_name      = serializers.CharField(source="created_by.full_name",            read_only=True)
 
     class Meta:
@@ -34,6 +36,8 @@ class StockMovementSerializer(serializers.ModelSerializer):
             "source_branch_name",
             "destination_branch",
             "destination_branch_name",
+            "supplier",
+            "supplier_name",
             "quantity",
             "adjustment_previous_quantity",
             "entry_date",
@@ -86,6 +90,12 @@ class IngresoSerializer(_QuantityValidationMixin, serializers.Serializer):
     branch     = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.filter(is_active=True))
     quantity   = serializers.DecimalField(max_digits=12, decimal_places=3)
     entry_date = serializers.DateField()
+    supplier   = serializers.PrimaryKeyRelatedField(
+        queryset=Supplier.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+        default=None,
+    )
     notes      = serializers.CharField(required=False, allow_blank=True, default="")
 
     def validate_quantity(self, value):

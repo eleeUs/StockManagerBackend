@@ -6,14 +6,14 @@ from .models import StockMovement
 class StockMovementAdmin(admin.ModelAdmin):
     list_display  = (
         "movement_type", "status", "product",
-        "source_branch", "destination_branch",
+        "source_branch", "destination_branch", "supplier",
         "quantity", "created_by", "created_at",
     )
     list_filter   = ("movement_type", "status", "source_branch", "destination_branch")
     search_fields = ("product__name", "product__sku", "created_by__email")
     readonly_fields = (
         "movement_type", "status", "product",
-        "source_branch", "destination_branch",
+        "source_branch", "destination_branch", "supplier",
         "quantity", "adjustment_previous_quantity",
         "entry_date", "reverses_movement",
         "created_by", "created_at", "notes",

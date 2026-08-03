@@ -1,6 +1,6 @@
 from django.urls import path
 
-from apps.stock.views import StockListView, StockByBranchView
+from apps.stock.views import StockListView, StockByBranchView, StockReorderPointView
 from .views import (
     MovementListView,
     IngresoView,
@@ -20,6 +20,7 @@ urlpatterns = [
     # -------------------------------------------------------------------
     path("stock/",                                    StockListView.as_view(),      name="stock-list"),
     path("stock/product/<int:product_id>/by-branch/", StockByBranchView.as_view(),  name="stock-by-branch"),
+    path("stock/<int:id>/reorder-point/",              StockReorderPointView.as_view(), name="stock-reorder-point"),
 
     # -------------------------------------------------------------------
     # Movement history (read-only, cursor-paginated)

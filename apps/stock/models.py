@@ -39,6 +39,19 @@ class Stock(models.Model):
         default=Decimal("0.000"),
         validators=[MinValueValidator(Decimal("0"))],
     )
+    # Per (product, branch) reorder threshold, not a global default —
+    # demand for the same product legitimately differs by branch.
+    # Null means "no alert configured for this row"; check_low_stock
+    # (BUSINESS_RULES §11) only evaluates rows where this is set.
+    # Updated via a dedicated endpoint/admin action, never through the
+    # movement service layer — it's metadata, not a stock mutation.
+    reorder_point = models.DecimalField(
+        max_digits=12,
+        decimal_places=3,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(Decimal("0"))],
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

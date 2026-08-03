@@ -35,3 +35,33 @@ class BranchActivitySerializer(serializers.Serializer):
     date_to          = serializers.DateField()
     summary_by_type  = MovementSummaryItemSerializer(many=True)
     daily_breakdown  = DailyBreakdownItemSerializer(many=True)
+
+
+class StockValuationByBranchItemSerializer(serializers.Serializer):
+    branch_id   = serializers.IntegerField()
+    branch_name = serializers.CharField()
+    valuation   = serializers.DecimalField(max_digits=16, decimal_places=3)
+
+
+class StockValuationByProductItemSerializer(serializers.Serializer):
+    product_id = serializers.IntegerField()
+    sku        = serializers.CharField()
+    name       = serializers.CharField()
+    quantity   = serializers.DecimalField(max_digits=12, decimal_places=3)
+    valuation  = serializers.DecimalField(max_digits=16, decimal_places=3)
+
+
+class StockValuationSerializer(serializers.Serializer):
+    """
+    GET /api/v1/reports/stock/valuation/ response shape.
+
+    products_missing_cost_price surfaces data quality: stock rows for
+    products with no cost_price set are excluded from valuation entirely
+    rather than silently treated as worth zero, so this count tells the
+    admin how much of the picture is missing.
+    """
+    branch                       = serializers.IntegerField(allow_null=True)
+    total_valuation              = serializers.DecimalField(max_digits=16, decimal_places=3)
+    products_missing_cost_price  = serializers.IntegerField()
+    by_branch                    = StockValuationByBranchItemSerializer(many=True)
+    by_product                   = StockValuationByProductItemSerializer(many=True)

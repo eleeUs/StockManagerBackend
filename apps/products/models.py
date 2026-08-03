@@ -1,4 +1,5 @@
 from django.db import models
+from django.core.validators import MinValueValidator
 
 
 class Category(models.Model):
@@ -52,6 +53,25 @@ class Product(models.Model):
         max_length=10,
         choices=UnitType.choices,
         default=UnitType.UNIT,
+    )
+    # Nullable: not every product has pricing loaded on day one. The
+    # valuation report (BUSINESS_RULES §9) excludes rows with no
+    # cost_price rather than silently treating them as zero-value stock.
+    cost_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0)],
+        help_text="Unit acquisition cost. Used for inventory valuation. Admin-only visibility.",
+    )
+    sale_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0)],
+        help_text="Unit sale price. Visible to all authenticated users.",
     )
     description = models.TextField(blank=True)
     is_active   = models.BooleanField(default=True)

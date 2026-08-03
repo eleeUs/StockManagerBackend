@@ -15,7 +15,7 @@ from decimal import Decimal
 
 from django.utils import timezone
 
-from tests.factories import BranchFactory, StockFactory, StockMovementFactory
+from tests.factories import BranchFactory, ProductFactory, StockFactory, StockMovementFactory
 from apps.movements.models import MovementType, StockMovement
 
 
@@ -221,3 +221,69 @@ class TestBranchActivityReport:
 
         assert response.data["summary_by_type"] == []
         assert response.data["daily_breakdown"] == []
+
+
+# ---------------------------------------------------------------------------
+# A4 — Stock valuation report (Phase 7)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+class TestStockValuationReport:
+    """GET /api/v1/reports/stock/valuation/"""
+
+    def test_unauthenticated_returns_401(self, api_client):
+        response = api_client.get("/api/v1/reports/stock/valuation/")
+        assert response.status_code == 401
+
+    def test_seller_cannot_access(self, seller_client):
+        client, user, branch = seller_client
+        response = client.get("/api/v1/reports/stock/valuation/")
+        assert response.status_code == 403
+
+    def test_computes_total_valuation(self, admin_client):
+        client, _ = admin_client
+        product = ProductFactory(cost_price=Decimal("10.00"))
+        StockFactory(product=product, quantity=Decimal("20"))
+
+        response = client.get("/api/v1/reports/stock/valuation/")
+
+        assert response.status_code == 200
+        assert Decimal(response.data["total_valuation"]) == Decimal("200.000")
+
+    def test_excludes_products_without_cost_price_and_flags_them(self, admin_client):
+        client, _ = admin_client
+        priced   = ProductFactory(cost_price=Decimal("10.00"))
+        unpriced = ProductFactory(cost_price=None)
+        StockFactory(product=priced, quantity=Decimal("5"))
+        StockFactory(product=unpriced, quantity=Decimal("100"))
+
+        response = client.get("/api/v1/reports/stock/valuation/")
+
+        assert response.status_code == 200
+        assert Decimal(response.data["total_valuation"]) == Decimal("50.000")
+        assert response.data["products_missing_cost_price"] == 1
+
+    def test_branch_filter_narrows_valuation(self, admin_client):
+        client, _ = admin_client
+        branch_a = BranchFactory()
+        branch_b = BranchFactory()
+        product = ProductFactory(cost_price=Decimal("10.00"))
+        StockFactory(product=product, branch=branch_a, quantity=Decimal("10"))
+        StockFactory(product=product, branch=branch_b, quantity=Decimal("30"))
+
+        response = client.get("/api/v1/reports/stock/valuation/", {"branch": branch_a.id})
+
+        assert Decimal(response.data["total_valuation"]) == Decimal("100.000")
+
+    def test_by_branch_and_by_product_breakdowns_present(self, admin_client):
+        client, _ = admin_client
+        product = ProductFactory(cost_price=Decimal("2.00"))
+        branch = BranchFactory()
+        StockFactory(product=product, branch=branch, quantity=Decimal("10"))
+
+        response = client.get("/api/v1/reports/stock/valuation/")
+
+        assert len(response.data["by_branch"]) >= 1
+        assert len(response.data["by_product"]) >= 1
+        product_row = next(r for r in response.data["by_product"] if r["product_id"] == product.id)
+        assert Decimal(product_row["valuation"]) == Decimal("20.000")

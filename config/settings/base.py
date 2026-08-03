@@ -42,8 +42,10 @@ THIRD_PARTY_APPS = [
 
 LOCAL_APPS = [
     "apps.users",
+    "apps.idempotency",
     "apps.branches",
     "apps.products",
+    "apps.suppliers",
     "apps.stock",
     "apps.movements",
 ]
@@ -213,6 +215,14 @@ SPECTACULAR_SETTINGS = {
 # ---------------------------------------------------------------------------
 CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOWED_ORIGINS = []
+
+# ---------------------------------------------------------------------------
+# Idempotency (apps/idempotency)
+# Default True everywhere, including this default value. False is an
+# operational escape hatch for emergencies (see docs/BUSINESS_RULES.md §12),
+# not a supported steady state.
+# ---------------------------------------------------------------------------
+IDEMPOTENCY_KEY_REQUIRED = env.bool("IDEMPOTENCY_KEY_REQUIRED", default=True)
 
 # ---------------------------------------------------------------------------
 # Logging
