@@ -590,3 +590,211 @@ fix(test): replace undefined make_stock() call with StockFactory
 - Pre-existing bug, unrelated to Phase 7 scope; fixed in passing since
   it broke test collection for this file
 ```
+
+---
+
+## Phase 8, Part 1 — Idempotency Foundations
+
+```
+feat(idempotency): add apps/idempotency with IdempotencyKey model
+
+- (user, key, endpoint) unique constraint; no status/state-machine field
+  by design — a row only ever exists in a fully-committed success state,
+  see the model's docstring for the rollback-semantics rationale
+- response_body uses DjangoJSONEncoder so Decimal/date/datetime values
+  from a DRF serializer's .data never fail JSON storage
+- expires_at + index, for cleanup_idempotency_keys (Part 3)
+- Registered in LOCAL_APPS (has real state, unlike the models-less
+  apps/reports from Phase 6)
+```
+
+```
+feat(idempotency): add IdempotencyService with get_or_create_and_lock
+
+- hash_body(): deterministic, order-independent sha256 of the request body
+- get_or_create_and_lock(): mirrors the get_or_create + select_for_update
+  pattern already used in apps/movements/services.py; MUST be called
+  inside a transaction.atomic() block the caller controls
+- Raises IdempotencyKeyConflictError on hash mismatch for a reused key —
+  never silently replay a response for a different logical request
+```
+
+```
+feat(core): add IdempotencyError hierarchy, separate from StockDomainError
+
+- IdempotencyKeyRequiredError → 400 idempotency_key_required
+- IdempotencyKeyConflictError → 409 idempotency_key_conflict
+- Kept as its own base, not under StockDomainError — a cross-cutting
+  HTTP concern, not a stock business rule
+```
+
+```
+feat(idempotency): add IdempotentMutationMixin, not wired to any view yet
+
+- Hooks post(), not dispatch()/initial() — permission_classes checks run
+  in DRF's initial(), always before a handler; hooking post() gets
+  permission-before-idempotency ordering for free without reimplementing
+  DRF internals
+- IDEMPOTENCY_KEY_REQUIRED setting added (default True everywhere,
+  including its own default value) as an operational escape hatch
+```
+
+```
+test(idempotency): add service + rollback + concurrency tests
+
+- Hash determinism, first-call/replay/conflict behavior for
+  get_or_create_and_lock
+- Rollback test: proves a row does NOT persist if the wrapped operation
+  raises inside the same transaction.atomic() block the mixin will use —
+  the test that validates the whole "no status field" design before
+  Part 2 depends on it
+- Concurrency test with real threads (TransactionTestCase, same pattern
+  as TestConcurrentVenta): exactly one of two simultaneous callers with
+  the same key gets created=True
+- Verified zero behavioral change to any Phase 1-7 endpoint: the mixin
+  is built but referenced nowhere outside apps/idempotency/
+```
+
+```
+chore: add VS Code testing configuration
+
+- .vscode/settings.json + launch.json for the pytest Test Explorer
+- .env.test.local.example: separate env file for running tests directly
+  from VS Code (host "localhost") vs. docker-compose (host "db")
+- docs/vscode-testing.md with full setup + troubleshooting
+```
+
+---
+
+## Phase 8, Part 2 — Enforcement
+
+```
+feat(movements): wire IdempotentMutationMixin into all nine write views
+
+- Ingreso, Venta, Transferencia, ConfirmTransfer, CancelTransfer,
+  Ajuste, Devolucion, Donacion, ReverseMovement: post() renamed to
+  perform_mutation(), IdempotentMutationMixin added to bases
+- Confirmed by design (and by locating VentaView's own explicit 403
+  seller/wrong-branch Response, which doesn't raise) that the mixin's
+  manual transaction.set_rollback() path is necessary, not redundant
+  with automatic rollback-on-exception
+```
+
+```
+feat(movements): move OpenAPI schema for the 9 write views to extend_schema_view
+
+- @extend_schema on perform_mutation() would be invisible to
+  drf-spectacular, which resolves schema from a method literally named
+  after the HTTP verb (post) — extend_schema_view maps schema to an
+  operation by name regardless of where in the MRO it's implemented
+- Added the Idempotency-Key header parameter + 409 conflict response to
+  all nine; merged the 409 description on ConfirmTransferView,
+  CancelTransferView, and ReverseMovementView (which already used 409
+  for their own business case) rather than silently overwriting it
+```
+
+```
+docs: add BUSINESS_RULES.md §12 — idempotency
+
+- Which endpoints require the header, replay/conflict/failed-attempt
+  behavior, (user, key, endpoint) scoping, and the
+  IDEMPOTENCY_KEY_REQUIRED escape hatch framed explicitly as an
+  emergency lever, not a supported steady state
+```
+
+```
+test(movements): add end-to-end idempotency wiring tests
+
+- Against VentaView as the representative endpoint (the mixin itself is
+  already fully unit-tested in Part 1)
+- Missing header → 400; replay → cached response, stock debited once;
+  conflicting body → 409; failed attempt (insufficient stock) is not
+  cached and a retry is a fresh attempt; VentaView's explicit 403 is
+  not cached either
+- Permission-ordering tests: unauthenticated → 401 not 400; seller on
+  an admin-only endpoint → 403 not 400, even with no header sent
+- Expected and confirmed: ~40 pre-existing call sites elsewhere in the
+  suite now fail with 400 idempotency_key_required — scoped fallout,
+  fixed in Part 3
+```
+
+---
+
+## Phase 8, Part 3 — Fallout Cleanup and Audit Trail
+
+```
+test: add tests/helpers.py::idempotent_post and fix ~40 call sites
+
+- Auto-generates a fresh UUID key per call by default
+- Did NOT default the header via client.credentials() on the shared
+  admin_client/seller_client fixtures — several tests reuse one client
+  for two distinct write calls (create-then-confirm a transfer); a
+  static default key would make them collide into a false 409
+- Two call sites needed distinct keys specifically verified by hand:
+  test_cannot_confirm_already_confirmed_transfer and
+  test_cannot_cancel_confirmed_transfer both call confirm/cancel twice
+  expecting the second call's 409 to be the real business error, not an
+  idempotency conflict with the same status code but the wrong reason
+- Updated: test_permissions.py, test_query_count.py,
+  test_supplier_ingreso.py, test_reversals.py
+```
+
+```
+test(movements): update query-count contracts for idempotency overhead
+
+- test_venta_query_count, test_transferencia_create_query_count,
+  test_transferencia_confirm_query_count: 3/3/4 → 6/6/7
+- +3 queries per write endpoint: SELECT-for-update miss, INSERT
+  placeholder row, UPDATE with final response
+- Numbers are a reasoned estimate, explicitly flagged in each docstring
+  as unverified against a real Postgres run — no DB access in the
+  environment this was written in
+- docs/phase-4.md's query-count table updated to match, cross-referenced
+  to docs/phase-8.md
+```
+
+```
+feat(idempotency): add cleanup_idempotency_keys management command
+
+- Same cron-facing shape as check_low_stock (Phase 7): no task queue
+- Deletes IdempotencyKey rows past expires_at; --dry-run supported
+```
+
+```
+feat(audit): add apps/audit with AuditLog for Product, Branch, User
+
+- (model_name, object_id) pair, not GenericForeignKey — three known
+  models, not an open-ended set; avoids a django_content_type join
+- Not django-simple-history — its default user-capture assumes
+  session-based auth populates request.user before its middleware runs;
+  this project's JWT-inside-DRF auth only resolves request.user inside
+  a view, same reason IdempotentMutationMixin is a DRF mixin and not
+  Django middleware (Part 1)
+- AuditedUpdateMixin.perform_update(): diffs only the fields the request
+  actually touched, captured explicitly at the point request.user is
+  known — not via pre_save/post_save signals, which have no reliable
+  access to the current user without thread-locals (and wouldn't work
+  during seed_dev_data, which has no request)
+- is_active=False specifically recorded as action=deactivate
+- Wired into ProductDetailView, BranchDetailView, UserDetailView
+- GET /api/v1/audit-log/ read endpoint, admin only, filterable by
+  model + object_id
+```
+
+```
+docs: add BUSINESS_RULES.md §13 — audit trail
+
+- What's recorded, explicit scope exclusions (admin/shell changes,
+  StockMovement's own existing audit trail, password changes), and who
+  can read it
+```
+
+```
+docs: add docs/phase-8.md covering all three parts
+
+- Includes the two technical findings made while implementing, not
+  anticipated in docs/phase8_prompt.md's original plan: the
+  extend_schema_view requirement (Part 2) and VentaView's explicit
+  non-raising 403 confirming the mixin's manual rollback path is
+  necessary (Part 1/2)
+```

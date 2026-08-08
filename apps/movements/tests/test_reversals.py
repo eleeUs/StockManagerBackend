@@ -20,6 +20,7 @@ from tests.factories import (
 from apps.movements.models import MovementType, MovementStatus
 from apps.movements.services import StockMovementService
 from apps.stock.models import Stock
+from tests.helpers import idempotent_post
 from core.exceptions import InsufficientStockError, InvalidMovementError
 
 
@@ -402,7 +403,7 @@ class TestReversalEdgeCases:
         client = APIClient()
         client.force_authenticate(user=self.admin)
 
-        response = client.post(f"/api/v1/movements/{movement.id}/reverse/", format="json")
+        response = idempotent_post(client, f"/api/v1/movements/{movement.id}/reverse/", format="json")
 
         assert response.status_code == 201
         assert response.data["movement_type"] == MovementType.REVERSAL
@@ -422,6 +423,6 @@ class TestReversalEdgeCases:
         client = APIClient()
         client.force_authenticate(user=seller)
 
-        response = client.post(f"/api/v1/movements/{movement.id}/reverse/", format="json")
+        response = idempotent_post(client, f"/api/v1/movements/{movement.id}/reverse/", format="json")
 
         assert response.status_code == 403

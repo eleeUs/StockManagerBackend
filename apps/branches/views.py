@@ -2,6 +2,7 @@ from rest_framework import generics
 from rest_framework.permissions import IsAuthenticated
 
 from core.permissions import IsAdmin
+from apps.audit.mixins import AuditedUpdateMixin
 from .models import Branch
 from .serializers import BranchSerializer
 
@@ -31,15 +32,17 @@ class BranchListCreateView(generics.ListCreateAPIView):
         return qs
 
 
-class BranchDetailView(generics.RetrieveUpdateAPIView):
+class BranchDetailView(AuditedUpdateMixin, generics.RetrieveUpdateAPIView):
     """
     GET   /api/v1/branches/{id}/  → Retrieve branch detail
     PATCH /api/v1/branches/{id}/  → Update branch (admin only)
 
     Branches are never deleted — deactivate via is_active=False.
+    Updates are recorded in the audit trail (BUSINESS_RULES §13).
     """
-    queryset         = Branch.objects.all()
-    serializer_class = BranchSerializer
+    queryset          = Branch.objects.all()
+    serializer_class   = BranchSerializer
+    audit_model_name   = "Branch"
 
     def get_permissions(self):
         if self.request.method in ("PATCH", "PUT"):

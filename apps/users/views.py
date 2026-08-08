@@ -8,6 +8,7 @@ from rest_framework import status
 
 from core.permissions import IsAdmin
 from core.views import LoginRateThrottle
+from apps.audit.mixins import AuditedUpdateMixin
 from .models import User
 from .serializers import (
     UserSerializer,
@@ -84,15 +85,17 @@ class UserListCreateView(generics.ListCreateAPIView):
         return UserSerializer
 
 
-class UserDetailView(generics.RetrieveUpdateAPIView):
+class UserDetailView(AuditedUpdateMixin, generics.RetrieveUpdateAPIView):
     """
     GET   /api/v1/users/{id}/  → Retrieve user detail
     PATCH /api/v1/users/{id}/  → Partial update (admin only)
 
     Sellers can retrieve their own profile.
     Only admins can retrieve any user or perform updates.
+    Updates are recorded in the audit trail (BUSINESS_RULES §13).
     """
-    queryset = User.objects.select_related("branch")
+    queryset          = User.objects.select_related("branch")
+    audit_model_name  = "User"
 
     def get_permissions(self):
         if self.request.method in ("PATCH", "PUT"):

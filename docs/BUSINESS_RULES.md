@@ -213,3 +213,115 @@ All non-transfer movements are single-step and are created in a confirmed state 
 - `reorder_point = null` means **no alert is configured for that row**, not "use some fallback threshold." Rows with no reorder point configured are never included in a low-stock alert.
 - Only admins can set or clear a row's `reorder_point`, via a dedicated endpoint that touches only that field — never `quantity`, which remains reachable exclusively through the movement service layer.
 - Low-stock evaluation (`quantity <= reorder_point`) is expected to run on a schedule external to the request/response cycle (cron, a scheduled job) rather than being computed synchronously on every stock read, since the project intentionally has no background task queue (see `phase6_prompt.md`).
+
+---
+
+## 12. Idempotency on Stock-Mutating Endpoints *(Phase 8)*
+
+### 12.1 Which endpoints require it
+
+An `Idempotency-Key` header is **required** on every endpoint that mutates
+stock:
+
+```
+POST /api/v1/movements/ingreso/
+POST /api/v1/movements/venta/
+POST /api/v1/movements/transferencia/
+POST /api/v1/movements/transferencia/{id}/confirm/
+POST /api/v1/movements/transferencia/{id}/cancel/
+POST /api/v1/movements/ajuste/
+POST /api/v1/movements/devolucion/
+POST /api/v1/movements/donacion/
+POST /api/v1/movements/{id}/reverse/
+```
+
+It is **not** required on endpoints that don't mutate stock (user,
+branch, product, supplier CRUD, the reorder-point endpoint) — a
+duplicated request there is not harmless, but it doesn't move inventory
+or money, so the cost/benefit of requiring it doesn't hold the same way.
+
+### 12.2 What the header must be
+
+A value the client generates and controls (a UUID is the expected
+format, though nothing enforces that specifically) that uniquely
+identifies **one specific write attempt**, including its retries. The
+same logical operation retried after a network failure must reuse the
+same key. A new, distinct operation must use a new key.
+
+### 12.3 Behavior
+
+- **Missing header** → `400`, error code `idempotency_key_required`.
+- **Same key, same request body, replayed** → the original response is
+  returned as-is, with its original status code. The business operation
+  is **not** re-executed — stock is not mutated a second time.
+- **Same key, different request body** → `409`, error code
+  `idempotency_key_conflict`. Nothing is executed. This is never treated
+  as a replay, because doing so would silently return a response for a
+  different logical request than the one just sent.
+- **A genuinely failed attempt** (e.g. insufficient stock) does **not**
+  get cached. A retry with the same key after a real failure is a fresh
+  attempt against current state, not a replay — this matters because the
+  underlying condition (e.g. stock availability) may have changed
+  between the failed attempt and the retry.
+
+### 12.4 Scope of a key
+
+A key is scoped to `(user, key, endpoint)` — the same key value reused
+by two different users, or reused by the same user against two
+different endpoints, does not collide. This means a client doesn't need
+globally-unique key generation across its entire integration, only
+uniqueness per logical write operation.
+
+### 12.5 Operational escape hatch
+
+The `IDEMPOTENCY_KEY_REQUIRED` setting (default `True` everywhere,
+including in the codebase's own default value) can be set to `False` to
+make the header optional again, restoring pre-Phase-8 behavior. This
+exists as an emergency operational lever — for example, if a client
+integration hasn't been updated yet and production needs to be
+unblocked without a code deploy — and is **not** a supported steady
+state. It should not be left `False` in any environment as a matter of
+routine configuration.
+
+---
+
+## 13. Audit Trail for Product, Branch, and User *(Phase 8)*
+
+### 13.1 What is recorded
+
+Every `PATCH` to `/api/v1/products/{id}/`, `/api/v1/branches/{id}/`, and
+`/api/v1/users/{id}/` that actually changes at least one field creates
+one `AuditLog` entry recording: which model and object, which fields
+changed (old and new value for each), who made the change, and when. A
+request that succeeds but changes nothing (e.g. `PATCH` with a value
+identical to the current one) creates no entry — there is nothing to
+audit.
+
+Setting `is_active=False` is recorded with `action=deactivate` rather
+than the generic `update`, so deactivations are distinguishable at a
+glance without inspecting the `changes` payload.
+
+### 13.2 What is explicitly out of scope
+
+- **Changes made via the Django admin or a shell session are not
+  captured.** Capture happens in the API view layer, at the point
+  `request.user` is known with certainty — there is no request (and no
+  reliable "current user") in those contexts. Admin/shell access already
+  requires superuser-level trust distinct from ordinary API access; what
+  this audit trail answers is "what did a user of the system do through
+  the API."
+- **Stock movements are not part of this audit trail.** `StockMovement`
+  already has its own complete, append-only audit story (§7) — every
+  movement records `created_by` and `created_at` permanently, and
+  corrections happen via reversal records, never edits. `AuditLog` exists
+  for the three models that had no equivalent trail before Phase 8.
+- **Password changes are never recorded here.** They go through a
+  separate endpoint (`POST /api/v1/auth/change-password/`) that isn't a
+  `RetrieveUpdateAPIView` and therefore isn't wired into this mechanism
+  at all — not merely filtered out.
+
+### 13.3 Who can read it
+
+`GET /api/v1/audit-log/` is admin-only, filterable by `model` and
+`object_id`. Sellers cannot access it — the same visibility boundary as
+user management itself (§1.2/§1.3).

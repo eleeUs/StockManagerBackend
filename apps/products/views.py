@@ -2,6 +2,7 @@ from rest_framework import generics
 from rest_framework.permissions import IsAuthenticated
 
 from core.permissions import IsAdmin
+from apps.audit.mixins import AuditedUpdateMixin
 from .models import Category, Product
 from .serializers import CategorySerializer, ProductSerializer
 
@@ -53,15 +54,17 @@ class ProductListCreateView(generics.ListCreateAPIView):
         return qs
 
 
-class ProductDetailView(generics.RetrieveUpdateAPIView):
+class ProductDetailView(AuditedUpdateMixin, generics.RetrieveUpdateAPIView):
     """
     GET   /api/v1/products/{id}/  → Retrieve product detail
     PATCH /api/v1/products/{id}/  → Update product (admin only)
 
     Products are never deleted — deactivate via is_active=False.
+    Updates are recorded in the audit trail (BUSINESS_RULES §13).
     """
-    queryset         = Product.objects.select_related("category")
-    serializer_class = ProductSerializer
+    queryset          = Product.objects.select_related("category")
+    serializer_class   = ProductSerializer
+    audit_model_name   = "Product"
 
     def get_permissions(self):
         if self.request.method in ("PATCH", "PUT"):

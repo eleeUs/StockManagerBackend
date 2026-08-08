@@ -25,6 +25,9 @@ urlpatterns = [
         # Reports (read-only aggregations; models-less app)
         path("reports/", include("apps.reports.urls")),
 
+        # Audit trail (Phase 8)
+        path("audit-log/", include("apps.audit.urls")),
+
         # OpenAPI schema + Swagger UI
         path("schema/", SpectacularAPIView.as_view(),                             name="schema"),
         path("docs/",   SpectacularSwaggerView.as_view(url_name="schema"),        name="swagger-ui"),

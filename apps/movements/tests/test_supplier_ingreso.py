@@ -13,6 +13,7 @@ from django.db import IntegrityError
 from django.test import TestCase
 
 from tests.factories import AdminFactory, BranchFactory, ProductFactory, SupplierFactory
+from tests.helpers import idempotent_post
 from apps.movements.models import StockMovement, MovementType, MovementStatus
 from apps.movements.services import StockMovementService
 
@@ -78,7 +79,8 @@ class TestIngresoEndpointWithSupplier:
         product  = ProductFactory()
         supplier = SupplierFactory()
 
-        response = client.post(
+        response = idempotent_post(
+            client,
             "/api/v1/movements/ingreso/",
             {
                 "product":    product.id,
@@ -98,7 +100,8 @@ class TestIngresoEndpointWithSupplier:
         branch  = BranchFactory()
         product = ProductFactory()
 
-        response = client.post(
+        response = idempotent_post(
+            client,
             "/api/v1/movements/ingreso/",
             {
                 "product":    product.id,

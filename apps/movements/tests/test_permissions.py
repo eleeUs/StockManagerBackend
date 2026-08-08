@@ -21,6 +21,7 @@ from tests.factories import (
     StockFactory,
     StockMovementFactory,
 )
+from tests.helpers import idempotent_post
 from apps.movements.models import MovementStatus
 
 
@@ -66,7 +67,7 @@ class TestSellerPermissions:
         client, user, branch = seller_client
         StockFactory(product=product, branch=branch, quantity=Decimal("10"))
 
-        response = client.post("/api/v1/movements/venta/", {
+        response = idempotent_post(client, "/api/v1/movements/venta/", {
             "product":  product.id,
             "branch":   branch.id,
             "quantity": "3.000",
@@ -81,7 +82,7 @@ class TestSellerPermissions:
         other_branch = BranchFactory()
         StockFactory(product=product, branch=other_branch, quantity=Decimal("10"))
 
-        response = client.post("/api/v1/movements/venta/", {
+        response = idempotent_post(client, "/api/v1/movements/venta/", {
             "product":  product.id,
             "branch":   other_branch.id,
             "quantity": "1.000",
@@ -106,7 +107,7 @@ class TestSellerPermissions:
         """BUSINESS_RULES §1.2: only admins can register stock entries."""
         client, user, branch = seller_client
 
-        response = client.post("/api/v1/movements/ingreso/", {
+        response = idempotent_post(client, "/api/v1/movements/ingreso/", {
             "product":    product.id,
             "branch":     branch.id,
             "quantity":   "10.000",
@@ -121,7 +122,7 @@ class TestSellerPermissions:
         other_branch = BranchFactory()
         StockFactory(product=product, branch=branch, quantity=Decimal("10"))
 
-        response = client.post("/api/v1/movements/transferencia/", {
+        response = idempotent_post(client, "/api/v1/movements/transferencia/", {
             "product":           product.id,
             "source_branch":     branch.id,
             "destination_branch": other_branch.id,
@@ -135,7 +136,7 @@ class TestSellerPermissions:
         client, user, branch = seller_client
         StockFactory(product=product, branch=branch, quantity=Decimal("10"))
 
-        response = client.post("/api/v1/movements/ajuste/", {
+        response = idempotent_post(client, "/api/v1/movements/ajuste/", {
             "product":      product.id,
             "branch":       branch.id,
             "new_quantity": "20.000",
@@ -148,7 +149,7 @@ class TestSellerPermissions:
         client, user, branch = seller_client
         StockFactory(product=product, branch=branch, quantity=Decimal("10"))
 
-        response = client.post("/api/v1/movements/devolucion/", {
+        response = idempotent_post(client, "/api/v1/movements/devolucion/", {
             "product":  product.id,
             "branch":   branch.id,
             "quantity": "1.000",
@@ -161,7 +162,7 @@ class TestSellerPermissions:
         client, user, branch = seller_client
         StockFactory(product=product, branch=branch, quantity=Decimal("10"))
 
-        response = client.post("/api/v1/movements/donacion/", {
+        response = idempotent_post(client, "/api/v1/movements/donacion/", {
             "product":  product.id,
             "branch":   branch.id,
             "quantity": "1.000",
@@ -288,7 +289,7 @@ class TestAdminPermissions:
         client, admin = admin_client
         branch = BranchFactory()
 
-        response = client.post("/api/v1/movements/ingreso/", {
+        response = idempotent_post(client, "/api/v1/movements/ingreso/", {
             "product":    product.id,
             "branch":     branch.id,
             "quantity":   "20.000",
@@ -303,7 +304,7 @@ class TestAdminPermissions:
         branch = BranchFactory()
         StockFactory(product=product, branch=branch, quantity=Decimal("10"))
 
-        response = client.post("/api/v1/movements/venta/", {
+        response = idempotent_post(client, "/api/v1/movements/venta/", {
             "product":  product.id,
             "branch":   branch.id,
             "quantity": "3.000",
@@ -317,7 +318,7 @@ class TestAdminPermissions:
         product, branch_a, branch_b = two_branches_with_stock
 
         # Step 1: create
-        create_response = client.post("/api/v1/movements/transferencia/", {
+        create_response = idempotent_post(client, "/api/v1/movements/transferencia/", {
             "product":            product.id,
             "source_branch":      branch_a.id,
             "destination_branch": branch_b.id,
@@ -328,8 +329,8 @@ class TestAdminPermissions:
 
         # Step 2: confirm
         movement_id = create_response.data["id"]
-        confirm_response = client.post(
-            f"/api/v1/movements/transferencia/{movement_id}/confirm/",
+        confirm_response = idempotent_post(
+            client, f"/api/v1/movements/transferencia/{movement_id}/confirm/",
             format="json",
         )
         assert confirm_response.status_code == 200
@@ -389,7 +390,7 @@ class TestTransferFlowPermissions:
         client, admin = admin_client
         product, branch_a, branch_b = two_branches_with_stock
 
-        create = client.post("/api/v1/movements/transferencia/", {
+        create = idempotent_post(client, "/api/v1/movements/transferencia/", {
             "product":            product.id,
             "source_branch":      branch_a.id,
             "destination_branch": branch_b.id,
@@ -397,9 +398,9 @@ class TestTransferFlowPermissions:
         }, format="json")
         movement_id = create.data["id"]
 
-        client.post(f"/api/v1/movements/transferencia/{movement_id}/confirm/", format="json")
-        second_confirm = client.post(
-            f"/api/v1/movements/transferencia/{movement_id}/confirm/",
+        idempotent_post(client, f"/api/v1/movements/transferencia/{movement_id}/confirm/", format="json")
+        second_confirm = idempotent_post(
+            client, f"/api/v1/movements/transferencia/{movement_id}/confirm/",
             format="json",
         )
 
@@ -411,7 +412,7 @@ class TestTransferFlowPermissions:
         client, admin = admin_client
         product, branch_a, branch_b = two_branches_with_stock
 
-        create = client.post("/api/v1/movements/transferencia/", {
+        create = idempotent_post(client, "/api/v1/movements/transferencia/", {
             "product":            product.id,
             "source_branch":      branch_a.id,
             "destination_branch": branch_b.id,
@@ -419,9 +420,9 @@ class TestTransferFlowPermissions:
         }, format="json")
         movement_id = create.data["id"]
 
-        client.post(f"/api/v1/movements/transferencia/{movement_id}/confirm/", format="json")
-        cancel = client.post(
-            f"/api/v1/movements/transferencia/{movement_id}/cancel/",
+        idempotent_post(client, f"/api/v1/movements/transferencia/{movement_id}/confirm/", format="json")
+        cancel = idempotent_post(
+            client, f"/api/v1/movements/transferencia/{movement_id}/cancel/",
             format="json",
         )
 
@@ -439,8 +440,8 @@ class TestTransferFlowPermissions:
             created_by=AdminFactory(),
         )
 
-        response = client.post(
-            f"/api/v1/movements/transferencia/{pending.id}/confirm/",
+        response = idempotent_post(
+            client, f"/api/v1/movements/transferencia/{pending.id}/confirm/",
             format="json",
         )
 

@@ -30,6 +30,7 @@ from tests.factories import (
     StockMovementFactory,
     CategoryFactory,
 )
+from tests.helpers import idempotent_post
 
 
 # ---------------------------------------------------------------------------
@@ -125,22 +126,42 @@ def test_stock_list_no_n_plus_one(admin_client, django_assert_num_queries):
 @pytest.mark.django_db
 def test_venta_query_count(admin_client, django_assert_num_queries):
     """
-    POST /api/v1/movements/venta/ must execute exactly 3 queries:
-      1. SELECT stock row WITH select_for_update() lock
-      2. UPDATE stock row
-      3. INSERT StockMovement record
+    POST /api/v1/movements/venta/ must execute exactly 6 queries as of
+    Phase 8 (was 3 before idempotency enforcement — see docs/phase8_prompt.md
+    Part 3):
 
-    All three happen inside transaction.atomic(), so they form a single
-    round trip to the DB from a connection perspective, but are counted
-    individually by django_assert_num_queries.
+      Idempotency layer (apps/idempotency/mixins.py, first-time key):
+      1. SELECT idempotency_key WITH select_for_update() — miss
+      2. INSERT idempotency_key placeholder row (get_or_create's create())
+
+      Original business operation (unchanged):
+      3. SELECT stock row WITH select_for_update() lock
+      4. UPDATE stock row
+      5. INSERT StockMovement record
+
+      Idempotency layer (after success):
+      6. UPDATE idempotency_key row with the final response
+
+    ⚠️ ESTIMATED COUNT — not verified against a real Postgres run in the
+    environment this was written in (no DB access available there). This
+    reasoning does NOT account for possible extra SAVEPOINT/RELEASE
+    SAVEPOINT statements from nesting transaction.atomic() (mixin) inside
+    django_assert_num_queries' own transaction wrapping, which may or may
+    not be counted depending on the Django/pytest-django version — the
+    existing pre-Phase-8 baseline of 3 (not 5, if savepoints were counted)
+    suggests they aren't counted in this setup, so this estimate assumes
+    the same. Run this test; if it fails, the actual number
+    django_assert_num_queries reports is correct — replace the 6 below
+    and update this docstring to match, do not adjust to make it pass
+    without understanding why the real count differs.
     """
     client, admin = admin_client
     branch  = BranchFactory()
     product = ProductFactory()
     StockFactory(product=product, branch=branch, quantity=Decimal("50"))
 
-    with django_assert_num_queries(3):
-        response = client.post("/api/v1/movements/venta/", {
+    with django_assert_num_queries(6):
+        response = idempotent_post(client, "/api/v1/movements/venta/", {
             "product":  product.id,
             "branch":   branch.id,
             "quantity": "5.000",
@@ -152,10 +173,17 @@ def test_venta_query_count(admin_client, django_assert_num_queries):
 @pytest.mark.django_db
 def test_transferencia_create_query_count(admin_client, django_assert_num_queries):
     """
-    POST /api/v1/movements/transferencia/ (step 1, creates PENDING):
-      1. SELECT source stock WITH select_for_update()
-      2. UPDATE source stock (decrement reservation)
-      3. INSERT StockMovement record (PENDING)
+    POST /api/v1/movements/transferencia/ (step 1, creates PENDING) must
+    execute exactly 6 queries as of Phase 8 (was 3 — see the detailed
+    breakdown and the ⚠️ ESTIMATED COUNT caveat on test_venta_query_count
+    above, which applies identically here):
+
+      1. SELECT idempotency_key WITH select_for_update() — miss
+      2. INSERT idempotency_key placeholder row
+      3. SELECT source stock WITH select_for_update()
+      4. UPDATE source stock (decrement reservation)
+      5. INSERT StockMovement record (PENDING)
+      6. UPDATE idempotency_key row with the final response
     """
     client, admin = admin_client
     branch_a = BranchFactory()
@@ -163,8 +191,8 @@ def test_transferencia_create_query_count(admin_client, django_assert_num_querie
     product  = ProductFactory()
     StockFactory(product=product, branch=branch_a, quantity=Decimal("30"))
 
-    with django_assert_num_queries(3):
-        response = client.post("/api/v1/movements/transferencia/", {
+    with django_assert_num_queries(6):
+        response = idempotent_post(client, "/api/v1/movements/transferencia/", {
             "product":            product.id,
             "source_branch":      branch_a.id,
             "destination_branch": branch_b.id,
@@ -177,11 +205,18 @@ def test_transferencia_create_query_count(admin_client, django_assert_num_querie
 @pytest.mark.django_db
 def test_transferencia_confirm_query_count(admin_client, django_assert_num_queries):
     """
-    POST /api/v1/movements/transferencia/{id}/confirm/ (step 2):
-      1. SELECT + lock the movement row (select_for_update on StockMovement)
-      2. SELECT (get_or_create) + lock destination stock row
-      3. UPDATE destination stock (increment)
-      4. UPDATE movement status to CONFIRMED
+    POST /api/v1/movements/transferencia/{id}/confirm/ (step 2) must
+    execute exactly 7 queries as of Phase 8 (was 4 — see the ⚠️ ESTIMATED
+    COUNT caveat on test_venta_query_count above, which applies
+    identically here):
+
+      1. SELECT idempotency_key WITH select_for_update() — miss
+      2. INSERT idempotency_key placeholder row
+      3. SELECT + lock the movement row (select_for_update on StockMovement)
+      4. SELECT (get_or_create) + lock destination stock row
+      5. UPDATE destination stock (increment)
+      6. UPDATE movement status to CONFIRMED
+      7. UPDATE idempotency_key row with the final response
     """
     client, admin = admin_client
     branch_a = BranchFactory()
@@ -189,7 +224,7 @@ def test_transferencia_confirm_query_count(admin_client, django_assert_num_queri
     product  = ProductFactory()
     StockFactory(product=product, branch=branch_a, quantity=Decimal("30"))
 
-    create_resp = client.post("/api/v1/movements/transferencia/", {
+    create_resp = idempotent_post(client, "/api/v1/movements/transferencia/", {
         "product":            product.id,
         "source_branch":      branch_a.id,
         "destination_branch": branch_b.id,
@@ -197,9 +232,9 @@ def test_transferencia_confirm_query_count(admin_client, django_assert_num_queri
     }, format="json")
     movement_id = create_resp.data["id"]
 
-    with django_assert_num_queries(4):
-        response = client.post(
-            f"/api/v1/movements/transferencia/{movement_id}/confirm/",
+    with django_assert_num_queries(7):
+        response = idempotent_post(
+            client, f"/api/v1/movements/transferencia/{movement_id}/confirm/",
             format="json",
         )
 

@@ -3,11 +3,18 @@ from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiParameter, OpenApiTypes
+from drf_spectacular.utils import (
+    extend_schema,
+    extend_schema_view,
+    OpenApiResponse,
+    OpenApiParameter,
+    OpenApiTypes,
+)
 
 from core.mixins import BranchScopeQuerysetMixin
 from core.permissions import IsAdmin, IsAdminOrSeller
 from core.pagination import MovementCursorPagination
+from apps.idempotency.mixins import IdempotentMutationMixin
 
 from .models import StockMovement
 from .serializers import (
@@ -31,6 +38,35 @@ _INSUFFICIENT_STOCK  = OpenApiResponse(description="Insufficient stock at branch
 _INVALID_MOVEMENT    = OpenApiResponse(description="Movement violates a business rule")
 _UNAUTHORIZED        = OpenApiResponse(description="User role does not permit this action")
 _NOT_FOUND           = OpenApiResponse(description="Movement not found")
+
+# Idempotency (Phase 8 Part 2) — shared across all nine write endpoints below.
+#
+# IMPORTANT: these @extend_schema blocks are applied via @extend_schema_view
+# at the CLASS level, targeting the "post" operation by name, rather than as
+# a decorator directly on a post() method. That's not a style choice — it's
+# required. drf-spectacular's schema extraction for an APIView inspects the
+# concrete view class for a method literally named after the HTTP verb
+# (post/get/...) and looks for @extend_schema on THAT method. Once
+# IdempotentMutationMixin supplies post() and each view defines
+# perform_mutation() instead, there is no post() on the concrete class for
+# a method-level @extend_schema to attach to — decorating perform_mutation()
+# directly would simply be invisible to drf-spectacular. @extend_schema_view
+# maps schema info to an operation by name regardless of where in the MRO
+# that method is actually implemented, which is exactly what's needed here.
+_IDEMPOTENCY_KEY_PARAM = OpenApiParameter(
+    "Idempotency-Key", OpenApiTypes.STR, OpenApiParameter.HEADER,
+    description=(
+        "Client-generated unique value (e.g. a UUID) identifying this "
+        "specific write attempt (BUSINESS_RULES §12). Required. Reusing "
+        "the same key with an identical request body replays the original "
+        "response without re-executing the operation. Reusing it with a "
+        "different body returns 409."
+    ),
+    required=True,
+)
+_IDEMPOTENCY_CONFLICT = OpenApiResponse(
+    description="Idempotency-Key was already used with a different request body."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -84,21 +120,25 @@ class MovementListView(BranchScopeQuerysetMixin, generics.ListAPIView):
 # Movement creation endpoints
 # ---------------------------------------------------------------------------
 
-class IngresoView(APIView):
-    """POST /api/v1/movements/ingreso/"""
-    permission_classes = [IsAdmin]
-
-    @extend_schema(
+@extend_schema_view(
+    post=extend_schema(
         tags=["Movements"],
         summary="Register a stock entry",
+        parameters=[_IDEMPOTENCY_KEY_PARAM],
         request=IngresoSerializer,
         responses={
             201: StockMovementSerializer,
             400: _INVALID_MOVEMENT,
             403: _UNAUTHORIZED,
+            409: _IDEMPOTENCY_CONFLICT,
         },
     )
-    def post(self, request):
+)
+class IngresoView(IdempotentMutationMixin, APIView):
+    """POST /api/v1/movements/ingreso/"""
+    permission_classes = [IsAdmin]
+
+    def perform_mutation(self, request):
         serializer = IngresoSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         d = serializer.validated_data
@@ -115,7 +155,23 @@ class IngresoView(APIView):
         return Response(StockMovementSerializer(movement).data, status=status.HTTP_201_CREATED)
 
 
-class VentaView(APIView):
+@extend_schema_view(
+    post=extend_schema(
+        tags=["Movements"],
+        summary="Register a sale",
+        parameters=[_IDEMPOTENCY_KEY_PARAM],
+        request=VentaSerializer,
+        responses={
+            201: StockMovementSerializer,
+            400: _INSUFFICIENT_STOCK,
+            403: OpenApiResponse(
+                description="Seller attempting to sell from a branch other than their own"
+            ),
+            409: _IDEMPOTENCY_CONFLICT,
+        },
+    )
+)
+class VentaView(IdempotentMutationMixin, APIView):
     """
     POST /api/v1/movements/venta/
 
@@ -124,24 +180,16 @@ class VentaView(APIView):
     """
     permission_classes = [IsAdminOrSeller]
 
-    @extend_schema(
-        tags=["Movements"],
-        summary="Register a sale",
-        request=VentaSerializer,
-        responses={
-            201: StockMovementSerializer,
-            400: _INSUFFICIENT_STOCK,
-            403: OpenApiResponse(
-                description="Seller attempting to sell from a branch other than their own"
-            ),
-        },
-    )
-    def post(self, request):
+    def perform_mutation(self, request):
         serializer = VentaSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         d = serializer.validated_data
 
-        # Sellers are restricted to their assigned branch (BUSINESS_RULES §1.2)
+        # Sellers are restricted to their assigned branch (BUSINESS_RULES §1.2).
+        # This is a data-level restriction, not a role check, so it stays here
+        # rather than in permission_classes — and it's exactly why the mixin's
+        # rollback-on-4xx-Response handling (not just on raised exceptions)
+        # exists: this branch returns a Response directly instead of raising.
         if request.user.is_seller and d["branch"] != request.user.branch:
             return Response(
                 {
@@ -161,11 +209,8 @@ class VentaView(APIView):
         return Response(StockMovementSerializer(movement).data, status=status.HTTP_201_CREATED)
 
 
-class TransferenciaView(APIView):
-    """POST /api/v1/movements/transferencia/"""
-    permission_classes = [IsAdmin]
-
-    @extend_schema(
+@extend_schema_view(
+    post=extend_schema(
         tags=["Movements - Transfers"],
         summary="Create a pending transfer between branches (step 1 of 2)",
         description=(
@@ -173,6 +218,7 @@ class TransferenciaView(APIView):
             "Source stock is decremented immediately to reserve the quantity. "
             "The transfer must be confirmed or cancelled explicitly."
         ),
+        parameters=[_IDEMPOTENCY_KEY_PARAM],
         request=TransferenciaSerializer,
         responses={
             201: StockMovementSerializer,
@@ -180,9 +226,15 @@ class TransferenciaView(APIView):
                 description="Insufficient stock at source, same source/destination, or invalid quantity"
             ),
             403: _UNAUTHORIZED,
+            409: _IDEMPOTENCY_CONFLICT,
         },
     )
-    def post(self, request):
+)
+class TransferenciaView(IdempotentMutationMixin, APIView):
+    """POST /api/v1/movements/transferencia/"""
+    permission_classes = [IsAdmin]
+
+    def perform_mutation(self, request):
         serializer = TransferenciaSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         d = serializer.validated_data
@@ -198,16 +250,14 @@ class TransferenciaView(APIView):
         return Response(StockMovementSerializer(movement).data, status=status.HTTP_201_CREATED)
 
 
-class ConfirmTransferView(APIView):
-    """POST /api/v1/movements/transferencia/{id}/confirm/"""
-    permission_classes = [IsAdmin]
-
-    @extend_schema(
+@extend_schema_view(
+    post=extend_schema(
         tags=["Movements - Transfers"],
         summary="Confirm a pending transfer (step 2 of 2)",
         description="Adds stock to the destination branch. Cannot be undone — create a reversal instead.",
         parameters=[
-            OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH, description="Transfer movement ID")
+            OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH, description="Transfer movement ID"),
+            _IDEMPOTENCY_KEY_PARAM,
         ],
         request=None,
         responses={
@@ -215,10 +265,21 @@ class ConfirmTransferView(APIView):
             400: _INVALID_MOVEMENT,
             403: _UNAUTHORIZED,
             404: _NOT_FOUND,
-            409: OpenApiResponse(description="Transfer already confirmed"),
+            409: OpenApiResponse(
+                description=(
+                    "Transfer already confirmed, OR Idempotency-Key was already used "
+                    "with a different request body — check the 'error' field in the "
+                    "response body to tell them apart."
+                )
+            ),
         },
     )
-    def post(self, request, pk):
+)
+class ConfirmTransferView(IdempotentMutationMixin, APIView):
+    """POST /api/v1/movements/transferencia/{id}/confirm/"""
+    permission_classes = [IsAdmin]
+
+    def perform_mutation(self, request, pk):
         movement = StockMovementService.confirmar_transferencia(
             movement_id=pk,
             user=request.user,
@@ -226,16 +287,14 @@ class ConfirmTransferView(APIView):
         return Response(StockMovementSerializer(movement).data, status=status.HTTP_200_OK)
 
 
-class CancelTransferView(APIView):
-    """POST /api/v1/movements/transferencia/{id}/cancel/"""
-    permission_classes = [IsAdmin]
-
-    @extend_schema(
+@extend_schema_view(
+    post=extend_schema(
         tags=["Movements - Transfers"],
         summary="Cancel a pending transfer",
         description="Restores stock to the source branch. Only works on PENDING transfers.",
         parameters=[
-            OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH, description="Transfer movement ID")
+            OpenApiParameter("id", OpenApiTypes.INT, OpenApiParameter.PATH, description="Transfer movement ID"),
+            _IDEMPOTENCY_KEY_PARAM,
         ],
         request=None,
         responses={
@@ -243,10 +302,21 @@ class CancelTransferView(APIView):
             400: _INVALID_MOVEMENT,
             403: _UNAUTHORIZED,
             404: _NOT_FOUND,
-            409: OpenApiResponse(description="Cannot cancel a confirmed transfer"),
+            409: OpenApiResponse(
+                description=(
+                    "Cannot cancel a confirmed transfer, OR Idempotency-Key was already "
+                    "used with a different request body — check the 'error' field in "
+                    "the response body to tell them apart."
+                )
+            ),
         },
     )
-    def post(self, request, pk):
+)
+class CancelTransferView(IdempotentMutationMixin, APIView):
+    """POST /api/v1/movements/transferencia/{id}/cancel/"""
+    permission_classes = [IsAdmin]
+
+    def perform_mutation(self, request, pk):
         movement = StockMovementService.cancelar_transferencia(
             movement_id=pk,
             user=request.user,
@@ -254,11 +324,8 @@ class CancelTransferView(APIView):
         return Response(StockMovementSerializer(movement).data, status=status.HTTP_200_OK)
 
 
-class AjusteView(APIView):
-    """POST /api/v1/movements/ajuste/"""
-    permission_classes = [IsAdmin]
-
-    @extend_schema(
+@extend_schema_view(
+    post=extend_schema(
         tags=["Movements"],
         summary="Adjust stock to an absolute value",
         description=(
@@ -266,14 +333,21 @@ class AjusteView(APIView):
             "Intended for physical inventory corrections. "
             "To add stock formally, use the ingreso endpoint instead."
         ),
+        parameters=[_IDEMPOTENCY_KEY_PARAM],
         request=AjusteSerializer,
         responses={
             201: StockMovementSerializer,
             400: _INVALID_MOVEMENT,
             403: _UNAUTHORIZED,
+            409: _IDEMPOTENCY_CONFLICT,
         },
     )
-    def post(self, request):
+)
+class AjusteView(IdempotentMutationMixin, APIView):
+    """POST /api/v1/movements/ajuste/"""
+    permission_classes = [IsAdmin]
+
+    def perform_mutation(self, request):
         serializer = AjusteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         d = serializer.validated_data
@@ -288,17 +362,15 @@ class AjusteView(APIView):
         return Response(StockMovementSerializer(movement).data, status=status.HTTP_201_CREATED)
 
 
-class DevolucionView(APIView):
-    """POST /api/v1/movements/devolucion/"""
-    permission_classes = [IsAdmin]
-
-    @extend_schema(
+@extend_schema_view(
+    post=extend_schema(
         tags=["Movements"],
         summary="Register a product return",
         description=(
             "Returns stock to the same branch where the original sale occurred. "
             "Referencing the original_movement is optional but strongly recommended for audit."
         ),
+        parameters=[_IDEMPOTENCY_KEY_PARAM],
         request=DevolucionSerializer,
         responses={
             201: StockMovementSerializer,
@@ -306,9 +378,15 @@ class DevolucionView(APIView):
                 description="Return quantity exceeds original sale or branch mismatch"
             ),
             403: _UNAUTHORIZED,
+            409: _IDEMPOTENCY_CONFLICT,
         },
     )
-    def post(self, request):
+)
+class DevolucionView(IdempotentMutationMixin, APIView):
+    """POST /api/v1/movements/devolucion/"""
+    permission_classes = [IsAdmin]
+
+    def perform_mutation(self, request):
         serializer = DevolucionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         d = serializer.validated_data
@@ -326,21 +404,25 @@ class DevolucionView(APIView):
         return Response(StockMovementSerializer(movement).data, status=status.HTTP_201_CREATED)
 
 
-class DonacionView(APIView):
-    """POST /api/v1/movements/donacion/"""
-    permission_classes = [IsAdmin]
-
-    @extend_schema(
+@extend_schema_view(
+    post=extend_schema(
         tags=["Movements"],
         summary="Register a stock donation",
+        parameters=[_IDEMPOTENCY_KEY_PARAM],
         request=DonacionSerializer,
         responses={
             201: StockMovementSerializer,
             400: _INSUFFICIENT_STOCK,
             403: _UNAUTHORIZED,
+            409: _IDEMPOTENCY_CONFLICT,
         },
     )
-    def post(self, request):
+)
+class DonacionView(IdempotentMutationMixin, APIView):
+    """POST /api/v1/movements/donacion/"""
+    permission_classes = [IsAdmin]
+
+    def perform_mutation(self, request):
         serializer = DonacionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         d = serializer.validated_data
@@ -355,7 +437,41 @@ class DonacionView(APIView):
         return Response(StockMovementSerializer(movement).data, status=status.HTTP_201_CREATED)
 
 
-class ReverseMovementView(APIView):
+@extend_schema_view(
+    post=extend_schema(
+        tags=["Movements"],
+        summary="Reverse a confirmed movement",
+        description=(
+            "Creates a REVERSAL movement with the opposite stock effect. "
+            "The original movement is never modified. "
+            "Cannot be applied to pending transfers or movements already reversed."
+        ),
+        parameters=[
+            OpenApiParameter(
+                "id", OpenApiTypes.INT, OpenApiParameter.PATH,
+                description="ID of the movement to reverse",
+            ),
+            _IDEMPOTENCY_KEY_PARAM,
+        ],
+        request=None,
+        responses={
+            201: StockMovementSerializer,
+            400: OpenApiResponse(
+                description="Movement is pending, already reversed, or insufficient stock to undo"
+            ),
+            403: _UNAUTHORIZED,
+            404: _NOT_FOUND,
+            409: OpenApiResponse(
+                description=(
+                    "Movement has already been reversed, OR Idempotency-Key was already "
+                    "used with a different request body — check the 'error' field in "
+                    "the response body to tell them apart."
+                )
+            ),
+        },
+    )
+)
+class ReverseMovementView(IdempotentMutationMixin, APIView):
     """
     POST /api/v1/movements/{id}/reverse/
 
@@ -370,32 +486,7 @@ class ReverseMovementView(APIView):
     """
     permission_classes = [IsAdmin]
 
-    @extend_schema(
-        tags=["Movements"],
-        summary="Reverse a confirmed movement",
-        description=(
-            "Creates a REVERSAL movement with the opposite stock effect. "
-            "The original movement is never modified. "
-            "Cannot be applied to pending transfers or movements already reversed."
-        ),
-        parameters=[
-            OpenApiParameter(
-                "id", OpenApiTypes.INT, OpenApiParameter.PATH,
-                description="ID of the movement to reverse",
-            )
-        ],
-        request=None,
-        responses={
-            201: StockMovementSerializer,
-            400: OpenApiResponse(
-                description="Movement is pending, already reversed, or insufficient stock to undo"
-            ),
-            403: _UNAUTHORIZED,
-            404: _NOT_FOUND,
-            409: OpenApiResponse(description="Movement has already been reversed"),
-        },
-    )
-    def post(self, request, pk):
+    def perform_mutation(self, request, pk):
         reversal = StockMovementService.revertir(
             movement_id=pk,
             user=request.user,

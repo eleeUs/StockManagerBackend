@@ -43,6 +43,7 @@ THIRD_PARTY_APPS = [
 LOCAL_APPS = [
     "apps.users",
     "apps.idempotency",
+    "apps.audit",
     "apps.branches",
     "apps.products",
     "apps.suppliers",
