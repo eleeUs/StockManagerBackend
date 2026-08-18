@@ -9,3 +9,31 @@ ignore = ["E501"]
 [tool.ruff.format]
 quote-style  = "double"
 indent-style = "space"
+
+[tool.coverage.run]
+branch = true
+source = ["apps", "core"]
+omit = [
+    "*/migrations/*",
+    "*/tests/*",
+    "*/test_*.py",
+    "manage.py",
+    "config/*",
+]
+
+[tool.coverage.report]
+# Lines that are structurally unreachable in normal test runs (e.g.
+# defensive __repr__, "if TYPE_CHECKING" blocks) shouldn't count against
+# the ratio — but be sparing with # pragma: no cover, it's easy to abuse
+# as a way to dodge the threshold instead of writing the test.
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+skip_covered = false
+show_missing = true
+
+[tool.coverage.html]
+directory = "htmlcov"

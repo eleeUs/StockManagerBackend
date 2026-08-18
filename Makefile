@@ -1,4 +1,4 @@
-.PHONY: help build up down migrate seed test test-v lint shell logs prod-up
+.PHONY: help build up down migrate seed test test-v coverage lint shell logs prod-up
 
 help: ## Show this help message
 	@echo "Available targets:"
@@ -24,6 +24,10 @@ test: ## Run the test suite
 
 test-v: ## Run the test suite verbosely
 	docker-compose exec api pytest -v
+
+coverage: ## Run tests with coverage (term + html)
+	docker-compose exec api pytest
+	@echo "HTML report ready at ./htmlcov/index.html (source is bind-mounted, no copy needed)"
 
 lint: ## Run ruff checks
 	docker-compose exec api ruff check .
