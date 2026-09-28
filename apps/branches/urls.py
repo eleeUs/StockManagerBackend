@@ -1,7 +1,8 @@
 from django.urls import path
-from .views import BranchListCreateView, BranchDetailView
+
+from .views import BranchDetailView, BranchListCreateView
 
 urlpatterns = [
-    path("",        BranchListCreateView.as_view(), name="branch-list-create"),
-    path("<int:pk>/", BranchDetailView.as_view(),   name="branch-detail"),
+    path("", BranchListCreateView.as_view(), name="branch-list-create"),
+    path("<int:pk>/", BranchDetailView.as_view(), name="branch-detail"),
 ]

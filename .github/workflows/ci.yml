@@ -1,0 +1,138 @@
+name: CI
+
+# This file was documented in docs/phase-6.md (lint + test) and
+# docs/roadmap-fases-7-10.md (pip-audit + gitleaks added alongside),
+# but never actually committed — see docs/phase-9-bugfix-plan.md for
+# how that was found. Built from scratch here to match both specs.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# Cancel a still-running workflow for the same branch/PR when a new
+# commit lands, instead of letting stale runs finish and burn minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Pinned to the version pinned in requirements/development.txt,
+      # so CI enforces the exact same rules a local `ruff check .` would.
+      - run: pip install ruff==0.4.4
+
+      - run: ruff check .
+      - run: ruff format --check .
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine  # matches docker-compose.yml's db service
+        env:
+          POSTGRES_DB: stock_db
+          POSTGRES_USER: stock_user
+          POSTGRES_PASSWORD: stock_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U stock_user -d stock_db"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # No .env file in CI — these are read directly from the process
+      # environment by django-environ (config/settings/base.py). Only
+      # SECRET_KEY and DATABASE_URL are required with no default; the
+      # rest fall back to base.py's defaults.
+      SECRET_KEY: ci-test-secret-key-not-for-production-use
+      DATABASE_URL: postgres://stock_user:stock_password@localhost:5432/stock_db
+      # Forces django-silk out of the app list — see config/settings/test.py
+      # and docs/phase-9-bugfix-plan.md §4 for why this matters even
+      # though it's not about query counts here: silk's background
+      # writes have also been observed colliding with pytest-django's
+      # test-database teardown.
+      DJANGO_SETTINGS_MODULE: config.settings.test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements/development.txt
+
+      - run: python manage.py migrate
+
+      # pytest.ini's addopts already include --cov and --cov-fail-under;
+      # a coverage regression fails this step same as a failing test.
+      - run: pytest
+
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install pip-audit
+
+      # Audits what's actually deployed (production.txt pulls in
+      # base.txt via -r, pip-audit resolves that). Deliberately not
+      # auditing development.txt's extra tooling (silk, ruff, factory-boy,
+      # ...) here — those never ship, a CVE in a dev-only dependency
+      # doesn't block a release.
+      #
+      # No severity filtering: pip-audit's CLI doesn't have a built-in
+      # --severity flag as of the version this was written against.
+      # If a specific advisory turns out to be a false positive or an
+      # accepted risk, suppress it explicitly and visibly rather than
+      # loosening this check:
+      #   pip-audit -r requirements/production.txt --ignore-vuln GHSA-xxxx-xxxx-xxxx
+      - run: pip-audit -r requirements/production.txt --desc
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # gitleaks needs full history, not a shallow clone
+
+      # Installing the gitleaks CLI directly rather than using
+      # gitleaks/gitleaks-action, which has (or has had) a license
+      # requirement for use on organization-owned repositories — the
+      # CLI itself does not. Pin bumped deliberately; check
+      # https://github.com/gitleaks/gitleaks/releases for newer tags
+      # periodically rather than tracking `latest` (a silently-updated
+      # scanner is a supply-chain risk in its own right).
+      - name: Install gitleaks
+        run: |
+          curl -sSfL -o gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo install gitleaks /usr/local/bin/gitleaks
+          rm gitleaks.tar.gz
+
+      # Full-repo scan, not diff-only. Diff-only scanning is faster and
+      # would be the natural next optimization, but needs base/head SHA
+      # handling that differs between push and pull_request events —
+      # getting that subtly wrong silently narrows what gets scanned,
+      # which is worse than a slower, unambiguously-correct full scan.
+      - name: Scan for leaked secrets
+        run: gitleaks detect --source . --redact --verbose

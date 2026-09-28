@@ -3,5 +3,18 @@
 django-silk==5.1.0
 django-extensions==3.2.3
 pytest-django==4.8.0
+pytest-cov==5.0.0
 factory-boy==3.3.0
 Faker==25.2.0
+ruff==0.4.4
+# Pin not verified live against PyPI (no network access when this was
+# written) — check https://pypi.org/project/pre-commit/ before relying
+# on this being the latest patch; 3.7.1 is known-correct for the same
+# era as the ruff==0.4.4 pin above, not necessarily current.
+pre-commit==3.7.1
+# Not used in development itself (production.py is the only settings
+# module that touches it) — installed here so tests/test_settings.py can
+# actually import config.settings.production with SENTRY_DSN set and
+# exercise sentry_sdk.init(), instead of only ever testing the disabled
+# path. Kept pinned to the same version as requirements/production.txt.
+sentry-sdk[django]==2.68.1

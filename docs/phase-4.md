@@ -113,9 +113,9 @@ silk panel. A failing test is immediate and mandatory.
 | `GET /movements/` (admin) | 1 | `select_related` fetches all in one JOIN |
 | `GET /movements/` (seller) | 1 | Branch scope filter is in the same query |
 | `GET /stock/` | 2 | Data + COUNT (uses `StandardPagination`) |
-| `POST /movements/venta/` | 3 | lock stock + update stock + insert movement |
-| `POST /movements/transferencia/` | 3 | lock source + update source + insert pending |
-| `POST /movements/transferencia/{id}/confirm/` | 4 | lock movement + get_or_create dest + update dest + update status |
+| `POST /movements/venta/` | 3 → **6** *(Phase 8)* | lock stock + update stock + insert movement, **+3 for idempotency**: lock/insert the key row before, update it with the response after — see `docs/phase8_prompt.md` Part 3 |
+| `POST /movements/transferencia/` | 3 → **6** *(Phase 8)* | lock source + update source + insert pending, **+3 for idempotency** (same breakdown as above) |
+| `POST /movements/transferencia/{id}/confirm/` | 4 → **7** *(Phase 8)* | lock movement + get_or_create dest + update dest + update status, **+3 for idempotency** (same breakdown as above) |
 | `GET /products/` | 2 | Data + COUNT |
 
 ### Selective test refactor (`test_services.py`)

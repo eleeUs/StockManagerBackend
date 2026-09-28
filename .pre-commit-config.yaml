@@ -1,0 +1,32 @@
+# See https://pre-commit.com for the full hook reference.
+#
+# Setup (one-time, per clone):
+#   pre-commit install
+# After that, these run automatically on `git commit`. To run them on
+# the whole repo without committing (e.g. right after adding this file,
+# or in CI): pre-commit run --all-files
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-case-conflict  # matters more than usual: dev on Windows, deploy on Linux
+      - id: debug-statements     # catches stray `import pdb; pdb.set_trace()`
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Pinned to match requirements/development.txt's ruff==0.4.4 exactly,
+    # so `pre-commit run` and a local `ruff check .` never disagree.
+    # NOTE: at this version the lint hook's id is "ruff", not
+    # "ruff-check" — that rename happened in a later ruff-pre-commit
+    # release. Bump both pins together, and re-check the hook id in
+    # this repo's README when you do: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format

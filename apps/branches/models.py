@@ -10,16 +10,17 @@ class Branch(models.Model):
     because the movement history must remain intact.
     The PROTECT on_delete in related models enforces this at the DB level.
     """
-    name       = models.CharField(max_length=100, unique=True)
-    address    = models.CharField(max_length=255, blank=True)
-    is_active  = models.BooleanField(default=True)
+
+    name = models.CharField(max_length=100, unique=True)
+    address = models.CharField(max_length=255, blank=True)
+    is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        verbose_name        = "Branch"
+        verbose_name = "Branch"
         verbose_name_plural = "Branches"
-        ordering            = ["name"]
+        ordering = ["name"]
 
     def __str__(self):
         return self.name

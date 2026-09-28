@@ -265,6 +265,8 @@ refactor(test): migrate test_services setUp methods to factory_boy
 
 ---
 
+---
+
 ## Security
 
 ```
@@ -281,4 +283,518 @@ security: upgrade password hashing to Argon2id with explicit parameters
   against GPU brute-force attacks on exposed internet-facing system
 - Django rehashes existing PBKDF2 passwords to Argon2 automatically
   on each user's next successful login; no manual migration required
+```
+
+
+---
+
+## Phase 5 — Migrations, Throttling, Password Change, Production Readiness
+
+```
+feat(migrations): add initial migrations for all apps in dependency order
+
+- apps/branches/migrations/0001_initial.py: Branch model
+- apps/products/migrations/0001_initial.py: Category and Product models
+- apps/users/migrations/0001_initial.py: custom User model with CheckConstraint
+  and M2M to auth.Group and auth.Permission; depends on branches
+- apps/stock/migrations/0001_initial.py: Stock model with unique_together,
+  two compound indexes, and non-negativity CheckConstraint
+- apps/movements/migrations/0001_initial.py: StockMovement with self-referential
+  OneToOneField (reverses_movement), five indexes, three CheckConstraints;
+  uses swappable_dependency(AUTH_USER_MODEL)
+```
+
+```
+feat(users): add seed_dev_data management command
+
+- Creates 3 branches, 3 categories, 8 products, 4 users, and initial stock
+- Fully idempotent via get_or_create — safe to run multiple times
+- --flush flag drops all data before seeding with interactive confirmation
+- Prints summary with created/skipped status per record
+- Admin credentials: admin@stockapp.dev / admin1234!
+```
+
+```
+feat(core): add LoginRateThrottle and global API throttle rates
+
+- Add LoginRateThrottle(AnonRateThrottle) with scope='login' in core/views.py
+- Apply throttle_classes=[LoginRateThrottle] on LoginView only
+- Add DEFAULT_THROTTLE_CLASSES and DEFAULT_THROTTLE_RATES to settings:
+  login=5/minute (per IP), user=200/minute, anon=20/minute
+- 5/min × Argon2 (~100ms/attempt) makes brute-force computationally infeasible
+- Document rate rationale in LoginRateThrottle docstring
+```
+
+```
+feat(users): add POST /auth/change-password/ endpoint
+
+- Add ChangePasswordSerializer with four validation rules:
+  current_password must match stored hash, new_password >= 8 chars,
+  confirm_password must equal new_password, new != current
+- Add ChangePasswordView returning 204 No Content on success
+- set_password() applies Argon2id hasher automatically
+- Only password and updated_at written to DB (update_fields)
+- Add URL at /api/v1/auth/change-password/
+```
+
+```
+feat(core): add HealthCheckView at GET /health/
+
+- No authentication or throttling — accessible by monitoring tools
+- Executes SELECT 1 to verify DB connection is alive
+- Returns {"status": "ok", "database": "ok"} with HTTP 200
+- Returns {"status": "error", "database": "unavailable"} with HTTP 503
+- Register in config/urls.py outside the api/v1/ prefix
+```
+
+```
+feat(core): add RequestIDMiddleware and RequestIDFilter for request tracing
+
+- RequestIDMiddleware reads X-Request-ID from incoming headers or generates uuid4
+- Attaches ID to request.request_id and thread-local storage
+- Writes X-Request-ID to every response header
+- Clears thread-local on response to prevent leakage between requests
+  in gunicorn sync workers that reuse OS threads
+- RequestIDFilter(logging.Filter) injects request_id into every log record
+- Update LOGGING config to use RequestIDFilter and include %(request_id)s
+  in the verbose formatter
+- Position middleware second in MIDDLEWARE stack (after SecurityMiddleware)
+```
+
+```
+feat(ops): add gunicorn config and production docker-compose override
+
+- Add gunicorn.conf.py with sync workers (CPU*2+1), timeout=30,
+  max_requests=1000 with jitter, accesslog/errorlog to stdout
+- Worker model rationale: select_for_update() is incompatible with
+  greenlet-based async workers; sync workers block correctly on DB locks
+- Add docker-compose.prod.yml as override file with gunicorn CMD
+  and REQUIREMENTS=production build arg
+- Update Dockerfile with ARG REQUIREMENTS for dev/prod requirement split
+```
+
+```
+test(phase5): add tests for health check, rate limiting, password change,
+and request ID propagation
+
+- TestHealthCheck: 200 when DB ok, no auth required, 503 when DB down,
+  response shape always includes both fields
+- TestLoginRateLimit: success within limit, 429 when throttled (mock),
+  throttle not applied to other endpoints
+- TestChangePassword: success 204, password actually changed in DB,
+  wrong current password, mismatched passwords, same password, too short,
+  unauthenticated returns 401
+- TestRequestID: response includes header, custom ID propagated,
+  server generates valid UUID when none provided
+```
+
+---
+
+## Phase 6 — Reporting, Security Hardening, and CI/CD
+
+```
+feat(reports): add apps/reports with low stock, movement summary, and
+branch activity endpoints
+
+- Models-less app, intentionally not registered in INSTALLED_APPS
+- LowStockReportView: reuses StockSerializer + StandardPagination;
+  sellers scoped to their own branch via BranchScopeQuerysetMixin.get_branch_q()
+- MovementSummaryReportView: annotate(count, total_quantity) grouped by
+  movement_type over a required date_from/date_to window; admin only
+- BranchActivityReportView: summary_by_type + daily_breakdown via
+  TruncDate; admin only; 404 on unknown branch id
+- All three views annotated with @extend_schema, tagged "Reports"
+- Registered at /api/v1/reports/ in config/urls.py
+```
+
+```
+test(reports): add test_reports.py covering all three report endpoints
+
+- Happy path, threshold filtering, and seller branch scoping for A1
+- Date-range filtering and aggregation correctness for A2
+- Daily breakdown correctness, unknown-branch 404, and cross-branch
+  exclusion for A3
+- Admin-only access verified (403) for A2 and A3
+- Test data exclusively from tests/factories.py; StockMovementFactory
+  used directly since these are read-only tests
+```
+
+```
+feat(security): add django-cors-headers with environment-scoped origins
+
+- CORS_ALLOW_ALL_ORIGINS=False and empty CORS_ALLOWED_ORIGINS in base.py
+  as a fail-safe default
+- development.py: CORS_ALLOW_ALL_ORIGINS=True for local frontend work
+- production.py: CORS_ALLOWED_ORIGINS read from env as an explicit list
+- CorsMiddleware placed immediately before CommonMiddleware per
+  django-cors-headers positioning requirement
+```
+
+```
+security: add SECURE_PROXY_SSL_HEADER and SECURE_HSTS_PRELOAD to production
+
+- SECURE_PROXY_SSL_HEADER required behind a TLS-terminating reverse proxy;
+  without it SECURE_SSL_REDIRECT causes a redirect loop
+- SECURE_HSTS_PRELOAD enables browser HSTS preload list submission
+```
+
+```
+chore: add .dockerignore
+
+- Excludes .env, .git, __pycache__, .pytest_cache, coverage artefacts,
+  docs/, and editor directories from the build context
+- requirements/ intentionally not excluded — needed at build time
+```
+
+```
+ci: add GitHub Actions workflow with parallel lint and test jobs
+
+- lint job: ruff check + ruff format --check, no database needed
+- test job: postgres:16-alpine service container with pg_isready
+  healthcheck, migrate, then pytest --tb=short -q
+- Triggers on push and pull_request to main and develop
+- Add pyproject.toml with ruff config (line-length=100, py312 target,
+  E/F/I/W rule sets)
+- Add ruff==0.4.4 to requirements/development.txt
+```
+
+```
+chore: add Makefile with docker-compose command shortcuts
+
+- Targets: help, build, up, down, migrate, seed, test, test-v, lint,
+  shell, logs, prod-up
+- All targets marked .PHONY
+```
+
+```
+build: convert Dockerfile to a multi-stage build
+
+- builder stage (python:3.12-slim): installs gcc/libffi-dev/libpq-dev,
+  pip installs into --prefix=/install
+- runtime stage (python:3.12-slim): copies only /install from builder;
+  no compiler toolchain in the final image
+- psycopg2-binary bundles libpq and argon2-cffi ships binary wheels,
+  so no apt packages are needed at runtime
+- ARG REQUIREMENTS=development redeclared in both stages (Docker scopes
+  build args per stage)
+```
+
+---
+
+## Phase 7 — Valorización, Proveedores y Alertas de Stock
+
+```
+feat(products): add cost_price and sale_price to Product
+
+- Both nullable DecimalField(max_digits=12, decimal_places=2),
+  MinValueValidator(0) — not every product has pricing loaded on day one
+- cost_price stripped from ProductSerializer.to_representation() for
+  sellers (margin-sensitive data); sale_price stays visible to both roles
+- Restriction applies automatically to every call site (list, detail),
+  not only a single endpoint
+```
+
+```
+feat(suppliers): add apps/suppliers with Supplier CRUD
+
+- Model: name (unique), contact_name, contact_email, contact_phone,
+  is_active, timestamps
+- List/detail views mirror apps/branches: both roles can list (sellers
+  see active only), admin-only create/update
+- Never hard-deleted — deactivate via is_active=False, PROTECT on FK
+  from StockMovement.supplier enforces this at the DB level
+- Registered in INSTALLED_APPS (has real state/migrations, unlike the
+  models-less apps/reports from Phase 6)
+- Registered at /api/v1/suppliers/ in config/urls.py
+```
+
+```
+feat(movements): add optional supplier FK to StockMovement, ingreso only
+
+- supplier FK nullable, PROTECT on_delete
+- movement_supplier_only_for_ingreso CheckConstraint: any movement type
+  other than ingreso storing a supplier is invalid at the DB level
+- IngresoSerializer accepts optional supplier; StockMovementService.ingreso
+  accepts supplier_id; IngresoView passes it through
+- StockMovementSerializer (read) exposes supplier + supplier_name
+```
+
+```
+feat(stock): add reorder_point to Stock, per (product, branch) row
+
+- Nullable DecimalField — null means no alert configured for this row,
+  not "use a global default"
+- Deliberately per-row, not a system-wide setting: demand for the same
+  product legitimately differs by branch
+- PATCH /api/v1/stock/{id}/reorder-point/ (admin only) touches only this
+  field via a narrow serializer — quantity remains reachable exclusively
+  through StockMovementService, this endpoint doesn't widen that boundary
+```
+
+```
+feat(stock): add check_low_stock management command
+
+- Scans Stock rows with reorder_point set where quantity <= reorder_point
+- Logs each match and prints a summary; --webhook-url POSTs a JSON
+  payload via urllib.request (stdlib) — no new dependency added
+- Designed for external scheduling (cron, k8s CronJob); project has no
+  task queue by design (phase6_prompt.md constraint)
+```
+
+```
+feat(reports): add GET /reports/stock/valuation/
+
+- Admin only, same rationale as cost_price itself being admin-only
+- quantity * cost_price aggregated by branch and by product via
+  ExpressionWrapper + Sum at the DB level
+- Rows with no cost_price are excluded from the total, never treated as
+  worth zero — products_missing_cost_price reports how many are missing
+  so the total's completeness is never ambiguous
+```
+
+```
+test: add Phase 7 coverage across suppliers, stock, products, movements, reports
+
+- apps/suppliers/tests/test_suppliers.py: CRUD + permission tests
+- apps/stock/tests/test_reorder_point.py: admin-only, never touches
+  quantity, null clears the alert, negative value rejected
+- apps/stock/tests/test_check_low_stock.py: command output, rows without
+  reorder_point skipped, webhook payload shape (mocked urlopen)
+- apps/products/tests/test_pricing.py: cost_price hidden from sellers in
+  both list and detail, sale_price always visible, negative price rejected
+- apps/movements/tests/test_supplier_ingreso.py: service accepts
+  supplier_id, DB constraint rejects supplier on non-ingreso movements,
+  endpoint round-trip with and without supplier
+- apps/reports/tests/test_reports.py: TestStockValuationReport — total
+  valuation, missing-cost-price exclusion and count, branch filter,
+  by_branch/by_product breakdown shape
+- tests/factories.py: add SupplierFactory, ProductFactory now sets
+  cost_price/sale_price defaults
+```
+
+```
+chore(seed): add suppliers and per-product pricing to seed_dev_data
+
+- New SUPPLIERS list seeded via get_or_create, same idempotent pattern
+  as the rest of the command
+- PRODUCTS entries now include cost_price/sale_price so the valuation
+  report has real data to show against a fresh seed
+```
+
+```
+fix(test): replace undefined make_stock() call with StockFactory
+
+- test_ingreso_adds_to_existing_stock referenced make_stock(...), a
+  helper removed in the Phase 4 factory_boy refactor that missed this
+  call site — StockFactory was already imported in the same file
+- Pre-existing bug, unrelated to Phase 7 scope; fixed in passing since
+  it broke test collection for this file
+```
+
+---
+
+## Phase 8, Part 1 — Idempotency Foundations
+
+```
+feat(idempotency): add apps/idempotency with IdempotencyKey model
+
+- (user, key, endpoint) unique constraint; no status/state-machine field
+  by design — a row only ever exists in a fully-committed success state,
+  see the model's docstring for the rollback-semantics rationale
+- response_body uses DjangoJSONEncoder so Decimal/date/datetime values
+  from a DRF serializer's .data never fail JSON storage
+- expires_at + index, for cleanup_idempotency_keys (Part 3)
+- Registered in LOCAL_APPS (has real state, unlike the models-less
+  apps/reports from Phase 6)
+```
+
+```
+feat(idempotency): add IdempotencyService with get_or_create_and_lock
+
+- hash_body(): deterministic, order-independent sha256 of the request body
+- get_or_create_and_lock(): mirrors the get_or_create + select_for_update
+  pattern already used in apps/movements/services.py; MUST be called
+  inside a transaction.atomic() block the caller controls
+- Raises IdempotencyKeyConflictError on hash mismatch for a reused key —
+  never silently replay a response for a different logical request
+```
+
+```
+feat(core): add IdempotencyError hierarchy, separate from StockDomainError
+
+- IdempotencyKeyRequiredError → 400 idempotency_key_required
+- IdempotencyKeyConflictError → 409 idempotency_key_conflict
+- Kept as its own base, not under StockDomainError — a cross-cutting
+  HTTP concern, not a stock business rule
+```
+
+```
+feat(idempotency): add IdempotentMutationMixin, not wired to any view yet
+
+- Hooks post(), not dispatch()/initial() — permission_classes checks run
+  in DRF's initial(), always before a handler; hooking post() gets
+  permission-before-idempotency ordering for free without reimplementing
+  DRF internals
+- IDEMPOTENCY_KEY_REQUIRED setting added (default True everywhere,
+  including its own default value) as an operational escape hatch
+```
+
+```
+test(idempotency): add service + rollback + concurrency tests
+
+- Hash determinism, first-call/replay/conflict behavior for
+  get_or_create_and_lock
+- Rollback test: proves a row does NOT persist if the wrapped operation
+  raises inside the same transaction.atomic() block the mixin will use —
+  the test that validates the whole "no status field" design before
+  Part 2 depends on it
+- Concurrency test with real threads (TransactionTestCase, same pattern
+  as TestConcurrentVenta): exactly one of two simultaneous callers with
+  the same key gets created=True
+- Verified zero behavioral change to any Phase 1-7 endpoint: the mixin
+  is built but referenced nowhere outside apps/idempotency/
+```
+
+```
+chore: add VS Code testing configuration
+
+- .vscode/settings.json + launch.json for the pytest Test Explorer
+- .env.test.local.example: separate env file for running tests directly
+  from VS Code (host "localhost") vs. docker-compose (host "db")
+- docs/vscode-testing.md with full setup + troubleshooting
+```
+
+---
+
+## Phase 8, Part 2 — Enforcement
+
+```
+feat(movements): wire IdempotentMutationMixin into all nine write views
+
+- Ingreso, Venta, Transferencia, ConfirmTransfer, CancelTransfer,
+  Ajuste, Devolucion, Donacion, ReverseMovement: post() renamed to
+  perform_mutation(), IdempotentMutationMixin added to bases
+- Confirmed by design (and by locating VentaView's own explicit 403
+  seller/wrong-branch Response, which doesn't raise) that the mixin's
+  manual transaction.set_rollback() path is necessary, not redundant
+  with automatic rollback-on-exception
+```
+
+```
+feat(movements): move OpenAPI schema for the 9 write views to extend_schema_view
+
+- @extend_schema on perform_mutation() would be invisible to
+  drf-spectacular, which resolves schema from a method literally named
+  after the HTTP verb (post) — extend_schema_view maps schema to an
+  operation by name regardless of where in the MRO it's implemented
+- Added the Idempotency-Key header parameter + 409 conflict response to
+  all nine; merged the 409 description on ConfirmTransferView,
+  CancelTransferView, and ReverseMovementView (which already used 409
+  for their own business case) rather than silently overwriting it
+```
+
+```
+docs: add BUSINESS_RULES.md §12 — idempotency
+
+- Which endpoints require the header, replay/conflict/failed-attempt
+  behavior, (user, key, endpoint) scoping, and the
+  IDEMPOTENCY_KEY_REQUIRED escape hatch framed explicitly as an
+  emergency lever, not a supported steady state
+```
+
+```
+test(movements): add end-to-end idempotency wiring tests
+
+- Against VentaView as the representative endpoint (the mixin itself is
+  already fully unit-tested in Part 1)
+- Missing header → 400; replay → cached response, stock debited once;
+  conflicting body → 409; failed attempt (insufficient stock) is not
+  cached and a retry is a fresh attempt; VentaView's explicit 403 is
+  not cached either
+- Permission-ordering tests: unauthenticated → 401 not 400; seller on
+  an admin-only endpoint → 403 not 400, even with no header sent
+- Expected and confirmed: ~40 pre-existing call sites elsewhere in the
+  suite now fail with 400 idempotency_key_required — scoped fallout,
+  fixed in Part 3
+```
+
+---
+
+## Phase 8, Part 3 — Fallout Cleanup and Audit Trail
+
+```
+test: add tests/helpers.py::idempotent_post and fix ~40 call sites
+
+- Auto-generates a fresh UUID key per call by default
+- Did NOT default the header via client.credentials() on the shared
+  admin_client/seller_client fixtures — several tests reuse one client
+  for two distinct write calls (create-then-confirm a transfer); a
+  static default key would make them collide into a false 409
+- Two call sites needed distinct keys specifically verified by hand:
+  test_cannot_confirm_already_confirmed_transfer and
+  test_cannot_cancel_confirmed_transfer both call confirm/cancel twice
+  expecting the second call's 409 to be the real business error, not an
+  idempotency conflict with the same status code but the wrong reason
+- Updated: test_permissions.py, test_query_count.py,
+  test_supplier_ingreso.py, test_reversals.py
+```
+
+```
+test(movements): update query-count contracts for idempotency overhead
+
+- test_venta_query_count, test_transferencia_create_query_count,
+  test_transferencia_confirm_query_count: 3/3/4 → 6/6/7
+- +3 queries per write endpoint: SELECT-for-update miss, INSERT
+  placeholder row, UPDATE with final response
+- Numbers are a reasoned estimate, explicitly flagged in each docstring
+  as unverified against a real Postgres run — no DB access in the
+  environment this was written in
+- docs/phase-4.md's query-count table updated to match, cross-referenced
+  to docs/phase-8.md
+```
+
+```
+feat(idempotency): add cleanup_idempotency_keys management command
+
+- Same cron-facing shape as check_low_stock (Phase 7): no task queue
+- Deletes IdempotencyKey rows past expires_at; --dry-run supported
+```
+
+```
+feat(audit): add apps/audit with AuditLog for Product, Branch, User
+
+- (model_name, object_id) pair, not GenericForeignKey — three known
+  models, not an open-ended set; avoids a django_content_type join
+- Not django-simple-history — its default user-capture assumes
+  session-based auth populates request.user before its middleware runs;
+  this project's JWT-inside-DRF auth only resolves request.user inside
+  a view, same reason IdempotentMutationMixin is a DRF mixin and not
+  Django middleware (Part 1)
+- AuditedUpdateMixin.perform_update(): diffs only the fields the request
+  actually touched, captured explicitly at the point request.user is
+  known — not via pre_save/post_save signals, which have no reliable
+  access to the current user without thread-locals (and wouldn't work
+  during seed_dev_data, which has no request)
+- is_active=False specifically recorded as action=deactivate
+- Wired into ProductDetailView, BranchDetailView, UserDetailView
+- GET /api/v1/audit-log/ read endpoint, admin only, filterable by
+  model + object_id
+```
+
+```
+docs: add BUSINESS_RULES.md §13 — audit trail
+
+- What's recorded, explicit scope exclusions (admin/shell changes,
+  StockMovement's own existing audit trail, password changes), and who
+  can read it
+```
+
+```
+docs: add docs/phase-8.md covering all three parts
+
+- Includes the two technical findings made while implementing, not
+  anticipated in docs/phase8_prompt.md's original plan: the
+  extend_schema_view requirement (Part 2) and VentaView's explicit
+  non-raising 403 confirming the mixin's manual rollback path is
+  necessary (Part 1/2)
 ```

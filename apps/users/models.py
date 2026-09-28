@@ -1,5 +1,6 @@
-from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
+from django.db import models
+
 from .managers import UserManager
 
 
@@ -18,12 +19,12 @@ class User(AbstractBaseUser, PermissionsMixin):
     """
 
     class Role(models.TextChoices):
-        ADMIN  = "admin",  "Admin"
+        ADMIN = "admin", "Admin"
         SELLER = "seller", "Seller"
 
-    email     = models.EmailField(unique=True)
+    email = models.EmailField(unique=True)
     full_name = models.CharField(max_length=150)
-    role      = models.CharField(
+    role = models.CharField(
         max_length=10,
         choices=Role.choices,
         default=Role.SELLER,
@@ -41,28 +42,28 @@ class User(AbstractBaseUser, PermissionsMixin):
     )
 
     is_active = models.BooleanField(default=True)
-    is_staff  = models.BooleanField(default=False)
+    is_staff = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     objects = UserManager()
 
-    USERNAME_FIELD  = "email"
+    USERNAME_FIELD = "email"
     REQUIRED_FIELDS = ["full_name"]
 
     class Meta:
-        verbose_name        = "User"
+        verbose_name = "User"
         verbose_name_plural = "Users"
-        ordering            = ["full_name"]
+        ordering = ["full_name"]
         constraints = [
             # A seller must have a branch assigned.
             # An admin must not have a branch assigned.
             # Enforced at the DB level — also validated in the serializer.
             models.CheckConstraint(
                 check=(
-                    models.Q(role="admin", branch__isnull=True) |
-                    models.Q(role="seller", branch__isnull=False)
+                    models.Q(role="admin", branch__isnull=True)
+                    | models.Q(role="seller", branch__isnull=False)
                 ),
                 name="user_branch_matches_role",
             )

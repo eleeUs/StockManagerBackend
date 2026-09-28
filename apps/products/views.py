@@ -1,21 +1,24 @@
 from rest_framework import generics
 from rest_framework.permissions import IsAuthenticated
 
+from apps.audit.mixins import AuditedUpdateMixin
 from core.permissions import IsAdmin
+
 from .models import Category, Product
 from .serializers import CategorySerializer, ProductSerializer
-
 
 # ---------------------------------------------------------------------------
 # Categories
 # ---------------------------------------------------------------------------
+
 
 class CategoryListCreateView(generics.ListCreateAPIView):
     """
     GET  /api/v1/products/categories/  → List all categories
     POST /api/v1/products/categories/  → Create category (admin only)
     """
-    queryset         = Category.objects.all()
+
+    queryset = Category.objects.all()
     serializer_class = CategorySerializer
 
     def get_permissions(self):
@@ -28,6 +31,7 @@ class CategoryListCreateView(generics.ListCreateAPIView):
 # Products
 # ---------------------------------------------------------------------------
 
+
 class ProductListCreateView(generics.ListCreateAPIView):
     """
     GET  /api/v1/products/  → List products
@@ -37,8 +41,9 @@ class ProductListCreateView(generics.ListCreateAPIView):
     Sellers see only active products.
     Admins see all products including inactive ones.
     """
+
     serializer_class = ProductSerializer
-    search_fields    = ["name", "sku"]
+    search_fields = ["name", "sku"]
     filterset_fields = ["category", "unit_type", "is_active"]
 
     def get_permissions(self):
@@ -53,15 +58,18 @@ class ProductListCreateView(generics.ListCreateAPIView):
         return qs
 
 
-class ProductDetailView(generics.RetrieveUpdateAPIView):
+class ProductDetailView(AuditedUpdateMixin, generics.RetrieveUpdateAPIView):
     """
     GET   /api/v1/products/{id}/  → Retrieve product detail
     PATCH /api/v1/products/{id}/  → Update product (admin only)
 
     Products are never deleted — deactivate via is_active=False.
+    Updates are recorded in the audit trail (BUSINESS_RULES §13).
     """
-    queryset         = Product.objects.select_related("category")
+
+    queryset = Product.objects.select_related("category")
     serializer_class = ProductSerializer
+    audit_model_name = "Product"
 
     def get_permissions(self):
         if self.request.method in ("PATCH", "PUT"):

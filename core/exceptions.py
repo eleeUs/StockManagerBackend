@@ -1,7 +1,6 @@
-from rest_framework.views import exception_handler
-from rest_framework.response import Response
 from rest_framework import status
-
+from rest_framework.response import Response
+from rest_framework.views import exception_handler
 
 # ---------------------------------------------------------------------------
 # Domain exceptions
@@ -10,8 +9,10 @@ from rest_framework import status
 # responses by custom_exception_handler below.
 # ---------------------------------------------------------------------------
 
+
 class StockDomainError(Exception):
     """Base for all domain exceptions in the stock system."""
+
     pass
 
 
@@ -20,6 +21,7 @@ class InsufficientStockError(StockDomainError):
     Raised when an operation would result in negative stock.
     Rule: stock can never go below zero (BUSINESS_RULES §2.1).
     """
+
     pass
 
 
@@ -28,6 +30,7 @@ class InvalidMovementError(StockDomainError):
     Raised when a movement violates a business rule
     (e.g. same source and destination, zero quantity).
     """
+
     pass
 
 
@@ -37,6 +40,7 @@ class UnauthorizedMovementError(StockDomainError):
     This is a domain-level check — DRF permission classes handle
     HTTP-level authorization before the service is even called.
     """
+
     pass
 
 
@@ -45,6 +49,7 @@ class TransferAlreadyConfirmedError(StockDomainError):
     Raised when trying to cancel a transfer that has already been confirmed.
     A confirmed transfer can only be reversed, not cancelled (BUSINESS_RULES §5).
     """
+
     pass
 
 
@@ -53,6 +58,41 @@ class ReturnExceedsSoldQuantityError(StockDomainError):
     Raised when the quantity being returned exceeds the quantity
     originally sold in the referenced movement (BUSINESS_RULES §3.5).
     """
+
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Idempotency exceptions
+# Deliberately NOT part of the StockDomainError hierarchy — these are a
+# cross-cutting HTTP/request concern, not a stock business rule. See
+# docs/phase8_prompt.md Part 1 for the full design rationale.
+# ---------------------------------------------------------------------------
+
+
+class IdempotencyError(Exception):
+    """Base for all idempotency-layer exceptions."""
+
+    pass
+
+
+class IdempotencyKeyRequiredError(IdempotencyError):
+    """
+    Raised when Idempotency-Key is required (IDEMPOTENCY_KEY_REQUIRED
+    setting) and missing from the request. → HTTP 400.
+    """
+
+    pass
+
+
+class IdempotencyKeyConflictError(IdempotencyError):
+    """
+    Raised when an Idempotency-Key is reused with a request body that
+    doesn't match the one it was first used with. Never silently replay
+    a cached response in this case — that would return a result for a
+    different logical request than the one the client just sent. → HTTP 409.
+    """
+
     pass
 
 
@@ -68,6 +108,8 @@ _DOMAIN_EXCEPTION_MAP = {
     UnauthorizedMovementError: (status.HTTP_403_FORBIDDEN, "unauthorized_movement"),
     TransferAlreadyConfirmedError: (status.HTTP_409_CONFLICT, "transfer_already_confirmed"),
     ReturnExceedsSoldQuantityError: (status.HTTP_400_BAD_REQUEST, "return_exceeds_sold_quantity"),
+    IdempotencyKeyRequiredError: (status.HTTP_400_BAD_REQUEST, "idempotency_key_required"),
+    IdempotencyKeyConflictError: (status.HTTP_409_CONFLICT, "idempotency_key_conflict"),
 }
 
 

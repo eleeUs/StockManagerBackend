@@ -1,27 +1,36 @@
-from rest_framework import generics
+from rest_framework import generics, status
 from rest_framework.permissions import IsAuthenticated
-from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
-from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
+from apps.audit.mixins import AuditedUpdateMixin
 from core.permissions import IsAdmin
-from .models import User
-from .serializers import UserSerializer, CreateUserSerializer, UpdateUserSerializer
+from core.views import LoginRateThrottle
 
+from .models import User
+from .serializers import (
+    ChangePasswordSerializer,
+    CreateUserSerializer,
+    UpdateUserSerializer,
+    UserSerializer,
+)
 
 # ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
 
+
 class LoginView(TokenObtainPairView):
     """
     POST /api/v1/auth/login/
     Returns access and refresh JWT tokens.
-    No authentication required.
+    Throttled to 5 attempts per minute per IP (LoginRateThrottle).
     """
+
     permission_classes = []
+    throttle_classes = [LoginRateThrottle]
 
 
 class RefreshTokenView(TokenRefreshView):
@@ -29,6 +38,7 @@ class RefreshTokenView(TokenRefreshView):
     POST /api/v1/auth/refresh/
     Exchanges a valid refresh token for a new access token.
     """
+
     permission_classes = []
 
 
@@ -39,6 +49,7 @@ class LogoutView(APIView):
     the session. The access token will expire on its own.
     Requires: { "refresh": "<token>" }
     """
+
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -63,11 +74,13 @@ class LogoutView(APIView):
 # User management (admin only)
 # ---------------------------------------------------------------------------
 
+
 class UserListCreateView(generics.ListCreateAPIView):
     """
     GET  /api/v1/users/  → List all users (admin only)
     POST /api/v1/users/  → Create a new user (admin only)
     """
+
     permission_classes = [IsAdmin]
     queryset = User.objects.select_related("branch").order_by("full_name")
 
@@ -77,15 +90,18 @@ class UserListCreateView(generics.ListCreateAPIView):
         return UserSerializer
 
 
-class UserDetailView(generics.RetrieveUpdateAPIView):
+class UserDetailView(AuditedUpdateMixin, generics.RetrieveUpdateAPIView):
     """
     GET   /api/v1/users/{id}/  → Retrieve user detail
     PATCH /api/v1/users/{id}/  → Partial update (admin only)
 
     Sellers can retrieve their own profile.
     Only admins can retrieve any user or perform updates.
+    Updates are recorded in the audit trail (BUSINESS_RULES §13).
     """
+
     queryset = User.objects.select_related("branch")
+    audit_model_name = "User"
 
     def get_permissions(self):
         if self.request.method in ("PATCH", "PUT"):
@@ -110,8 +126,34 @@ class MeView(generics.RetrieveAPIView):
     GET /api/v1/auth/me/
     Returns the profile of the currently authenticated user.
     """
+
     permission_classes = [IsAuthenticated]
     serializer_class = UserSerializer
 
     def get_object(self):
         return self.request.user
+
+
+class ChangePasswordView(APIView):
+    """
+    POST /api/v1/auth/change-password/
+
+    Allows any authenticated user to change their own password.
+    Requires the current password for verification — this prevents
+    a stolen session token from being used to lock out the real user.
+
+    On success the response is 204 No Content. The client should
+    discard existing tokens and prompt the user to log in again,
+    because token rotation is not automatic on password change.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = ChangePasswordSerializer(
+            data=request.data,
+            context={"request": request},
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(status=status.HTTP_204_NO_CONTENT)
