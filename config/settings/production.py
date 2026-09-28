@@ -1,4 +1,10 @@
 from .base import *  # noqa
+
+# Explicit (non-star) import of the one name this file mutates rather
+# than just reads/overrides — makes DATABASES an unambiguous reference
+# for ruff (F405) and for readers, instead of relying on the star
+# import above to have brought it in.
+from .base import DATABASES  # noqa: F401
 import environ
 
 env = environ.Env()
@@ -6,6 +12,41 @@ env = environ.Env()
 DEBUG = False
 
 ALLOWED_HOSTS = env.list("ALLOWED_HOSTS")
+
+# ---------------------------------------------------------------------------
+# Database: in production, DATABASE_URL (read by base.py into DATABASES
+# via env.db()) points at PgBouncer (pool_mode = transaction), not at
+# Postgres directly — see docker-compose.prod.yml and
+# docs/infra/pgbouncer.md. The two settings below are consequences of
+# that, not independent tuning knobs:
+# ---------------------------------------------------------------------------
+
+# PgBouncer already pools the server-side (PgBouncer→Postgres)
+# connections; Django holding its own long-lived (Django→PgBouncer)
+# connections on top of that would just move the connection-count
+# problem up one hop instead of solving it. CONN_MAX_AGE=0 closes the
+# Django-side connection at the end of every request, which is cheap
+# because it's only closing a connection to PgBouncer (in the same
+# Docker network), not doing a fresh TLS/auth handshake against
+# Postgres itself.
+#
+# CONN_HEALTH_CHECKS is deliberately NOT set here: it pings the
+# connection before reuse, which has no effect when CONN_MAX_AGE=0
+# closes that connection every request anyway. Only add it back if
+# CONN_MAX_AGE is raised above 0 — re-tune together, informed by
+# Equipo D's load test, not before.
+DATABASES["default"]["CONN_MAX_AGE"] = env.int("CONN_MAX_AGE", default=0)
+
+# Required with pool_mode = transaction: in transaction pooling, a
+# server-side connection can be handed to a *different* client as soon
+# as the current transaction ends. A named server-side cursor
+# (Queryset.iterator(), values_list(... ).iterator()) opened on one
+# connection would silently leak into whichever client gets that
+# connection next. The codebase doesn't use .iterator() today, so this
+# has no behavioral effect right now — it's a guardrail against
+# introducing one later while pooling is in place, not a workaround for
+# an existing usage.
+DATABASES["default"]["DISABLE_SERVER_SIDE_CURSORS"] = True
 
 # ---------------------------------------------------------------------------
 # Security headers for production

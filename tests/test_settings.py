@@ -66,6 +66,42 @@ def test_production_settings_import_without_sentry_dsn(monkeypatch):
     assert settings.DEBUG is False
 
 
+def test_production_database_defaults_for_pgbouncer(monkeypatch):
+    """
+    Both settings exist because DATABASE_URL points at PgBouncer in
+    production (pool_mode = transaction), not at Postgres directly —
+    see docker-compose.prod.yml and docs/infra/pgbouncer.md.
+    """
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("SENTRY_DSN", raising=False)
+    monkeypatch.delenv("CONN_MAX_AGE", raising=False)
+
+    settings = _import_production_settings()
+
+    # Default 0: Django must not hold its own persistent connection on
+    # top of what PgBouncer already pools.
+    assert settings.DATABASES["default"]["CONN_MAX_AGE"] == 0
+    # Required under transaction pooling — a named server-side cursor
+    # could otherwise leak across clients. See production.py's comment
+    # for why this stays True even though nothing uses .iterator() yet.
+    assert settings.DATABASES["default"]["DISABLE_SERVER_SIDE_CURSORS"] is True
+
+
+def test_production_conn_max_age_is_configurable(monkeypatch):
+    """
+    CONN_MAX_AGE is deliberately env-overridable (not hardcoded) so it
+    can be re-tuned from Equipo D's load-test results without a code
+    change — see production.py's comment on why it defaults to 0.
+    """
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("SENTRY_DSN", raising=False)
+    monkeypatch.setenv("CONN_MAX_AGE", "60")
+
+    settings = _import_production_settings()
+
+    assert settings.DATABASES["default"]["CONN_MAX_AGE"] == 60
+
+
 def test_production_settings_import_with_sentry_dsn(monkeypatch):
     """
     With SENTRY_DSN set, production.py must import sentry_sdk and call

@@ -4,6 +4,51 @@ version: "3.9"
 # Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up
 
 services:
+  # PgBouncer sits between gunicorn and Postgres in transaction-pooling
+  # mode, so the number of server-side connections stays predictable
+  # regardless of how many gunicorn workers/replicas are running. See
+  # docs/infra/pgbouncer.md for the sizing rationale and how to read
+  # SHOW POOLS / SHOW STATS / SHOW CLIENTS.
+  #
+  # NOTE: docker-compose merges list-valued keys (volumes, ports) across
+  # files rather than replacing them, so this overlay cannot *remove*
+  # the base file's `db.ports: ["5432:5432"]`. In this repo's current
+  # two-file setup, that port stays published even in prod — closing it
+  # requires either firewalling it at the host/network level, or
+  # splitting `db` into its own base file that the dev and prod compose
+  # files each extend differently. Tracked as a follow-up; not blocking
+  # this phase since Equipo A's job is the pool, not network exposure.
+  db:
+    volumes:
+      # Only applied by the official postgres image on a *fresh* data
+      # directory — see docker/postgres/initdb/01_pgbouncer_auth.sql
+      # for what this does and what to do if postgres_data already has
+      # data.
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.2-p0
+    restart: always
+    volumes:
+      # Mounting our own pgbouncer.ini disables the image's env-var-driven
+      # config generation entirely — see the file's own header comment.
+      - ./docker/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./docker/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # SHOW POOLS (the roadmap's original suggestion) goes through the
+      # admin console, which requires scram auth — not a good fit for a
+      # healthcheck. pg_isready just confirms pgbouncer is accepting TCP
+      # connections on 6432, which is what "is this service up" means
+      # here; SHOW POOLS itself is for docs/infra/pgbouncer.md's manual
+      # diagnostics, not automated health.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   api:
     build:
       context: .
@@ -14,4 +59,21 @@ services:
       --config gunicorn.conf.py
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.production
+      # Overrides the .env value (which points at db:5432 directly) —
+      # `environment:` takes precedence over `env_file:` in Compose.
+      # This is the ONLY place the app should point at pgbouncer:6432;
+      # one-off commands that must bypass the pool (migrate, pg_dump,
+      # heavy management commands — see docs/infra/pgbouncer.md
+      # §Direct access) override DATABASE_URL again, back to db:5432,
+      # at the point they're invoked. Never hardcode db:5432 here.
+      DATABASE_URL: postgres://stock_user:stock_password@pgbouncer:6432/stock_db
+      # gunicorn.conf.py falls back to 2×CPU+1 if this is unset, but
+      # that formula reads host core count inside a container, not any
+      # per-container CPU limit — set this explicitly for the actual
+      # deploy target and keep it in sync with pgbouncer.ini's
+      # max_client_conn sizing note.
+      WEB_CONCURRENCY: "5"
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
     restart: always

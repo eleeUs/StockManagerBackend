@@ -1,0 +1,20 @@
+# docker/pgbouncer/userlist.txt.example
+#
+# Copy this to docker/pgbouncer/userlist.txt (gitignored — never commit
+# the real file) and replace the placeholder with the SCRAM verifier
+# for the `pgbouncer_auth` role created by
+# docker/postgres/initdb/01_pgbouncer_auth.sql.
+#
+# This is the ONLY credential that belongs in this file: pgbouncer uses
+# it to authenticate itself to Postgres and run auth_query. App user
+# passwords are looked up dynamically via auth_query and are never
+# written here.
+#
+# Generate the real line with (see docs/infra/pgbouncer.md §Bootstrap):
+#   docker-compose -f docker-compose.yml -f docker-compose.prod.yml \
+#     exec db psql -U stock_user -d stock_db -tAc \
+#     "SELECT concat('\"', usename, '\" \"', passwd, '\"') \
+#      FROM pg_shadow WHERE usename = 'pgbouncer_auth'"
+#
+# Format: "username" "SCRAM-SHA-256$<iterations>:<salt>$<hash>:<hash>"
+"pgbouncer_auth" "REPLACE_WITH_SCRAM_VERIFIER_FROM_PG_SHADOW"

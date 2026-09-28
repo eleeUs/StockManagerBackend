@@ -1,4 +1,4 @@
-.PHONY: help build up down migrate seed test test-v coverage lint shell logs prod-up pre-commit-install pre-commit-run
+.PHONY: help build up down migrate seed test test-v coverage lint shell logs prod-up pre-commit-install pre-commit-run pgb-userlist pgb-pools pgb-stats pgb-clients prod-migrate
 
 help: ## Show this help message
 	@echo "Available targets:"
@@ -46,6 +46,35 @@ logs: ## Tail the api container logs
 
 prod-up: ## Start the production stack
 	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+# One-off commands that must bypass PgBouncer (migrations need a direct,
+# non-pooled connection — see docs/infra/pgbouncer.md §Direct access).
+# Overrides DATABASE_URL back to db:5432 for this single invocation only;
+# the running `api` container keeps using pgbouncer:6432 for everything else.
+prod-migrate: ## Apply migrations against Postgres directly, bypassing PgBouncer
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml \
+		run --rm -e DATABASE_URL=postgres://stock_user:stock_password@db:5432/stock_db \
+		api python manage.py migrate
+
+# See docker/pgbouncer/userlist.txt.example for what this generates and why.
+pgb-userlist: ## Regenerate docker/pgbouncer/userlist.txt from pg_shadow (run after rotating pgbouncer_auth's password)
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml \
+		exec db psql -U stock_user -d stock_db -tAc \
+		"SELECT concat('\"', usename, '\" \"', passwd, '\"') FROM pg_shadow WHERE usename = 'pgbouncer_auth'" \
+		> docker/pgbouncer/userlist.txt
+	@echo "Wrote docker/pgbouncer/userlist.txt — restart pgbouncer to pick it up: docker-compose -f docker-compose.yml -f docker-compose.prod.yml restart pgbouncer"
+
+pgb-pools: ## Show PgBouncer pool state (cl_active, cl_waiting, sv_active, sv_idle, maxwait)
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml \
+		exec pgbouncer psql -h 127.0.0.1 -p 6432 -U pgbouncer_auth pgbouncer -c "SHOW POOLS;"
+
+pgb-stats: ## Show PgBouncer throughput stats (avg_xact_time, avg_wait_time, ...)
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml \
+		exec pgbouncer psql -h 127.0.0.1 -p 6432 -U pgbouncer_auth pgbouncer -c "SHOW STATS;"
+
+pgb-clients: ## Show connected PgBouncer clients and how long each has been waiting
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml \
+		exec pgbouncer psql -h 127.0.0.1 -p 6432 -U pgbouncer_auth pgbouncer -c "SHOW CLIENTS;"
 
 # These two run on your HOST, not through docker-compose exec like
 # everything else in this file — git hooks fire from your local git
