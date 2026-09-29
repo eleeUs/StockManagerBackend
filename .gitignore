@@ -1,8 +1,8 @@
 # Environment
 .env
 *.env
-.env.test.local.example
 .env.example
+.env.test.local.example
 
 # Python
 __pycache__/

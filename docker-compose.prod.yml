@@ -44,12 +44,27 @@ services:
       # connections on 6432, which is what "is this service up" means
       # here; SHOW POOLS itself is for docs/infra/pgbouncer.md's manual
       # diagnostics, not automated health.
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432"]
+      #
+      # -U pgbouncer_auth is required: without it, pg_isready defaults to
+      # a "postgres" username that doesn't exist in userlist.txt, logging
+      # a "no such user: postgres" line every interval. pg_isready's
+      # probe doesn't need a working password — it just needs a username
+      # PgBouncer recognizes to get a real response instead of an
+      # immediate rejection.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U pgbouncer_auth"]
       interval: 5s
       timeout: 5s
       retries: 5
 
   api:
+    # Distinct tag from the dev image (Compose otherwise derives the
+    # same name for `api` in both files: `<project>-api`). Without
+    # this, whichever of `docker-compose up` (dev, REQUIREMENTS=development,
+    # no gunicorn) or `prod-up` (REQUIREMENTS=production) built last
+    # would silently overwrite the other's cached image — which is how
+    # `exec: "gunicorn": executable file not found in $PATH` happens
+    # here after having previously run the dev stack.
+    image: stock_manager_api:prod
     build:
       context: .
       args:

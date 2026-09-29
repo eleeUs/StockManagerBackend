@@ -44,8 +44,8 @@ shell: ## Open a Django shell_plus session
 logs: ## Tail the api container logs
 	docker-compose logs -f api
 
-prod-up: ## Start the production stack
-	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+prod-up: ## Start the production stack (always rebuilds — see docker-compose.prod.yml's api.image comment)
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 
 # One-off commands that must bypass PgBouncer (migrations need a direct,
 # non-pooled connection — see docs/infra/pgbouncer.md §Direct access).
@@ -57,12 +57,23 @@ prod-migrate: ## Apply migrations against Postgres directly, bypassing PgBouncer
 		api python manage.py migrate
 
 # See docker/pgbouncer/userlist.txt.example for what this generates and why.
+#
+# One line, one psql call, no shell conditionals, no awk. This target
+# used to be three commands with a POSIX "if [ ! -s ... ]" empty-file
+# check and an awk pipeline; both broke under a Windows Make whose
+# SHELL is cmd.exe (no /bin/sh on PATH), with cmd rejecting "!" outright
+# and never reaching the step that overwrites userlist.txt. The SQL
+# below builds the quoted "user" "hash" line with chr(34) so the shell
+# argument itself never contains a literal double quote to escape -
+# that's what made nested \" fragile across cmd.exe / PowerShell /
+# docker-compose's own arg parsing / the container's shell, four
+# layers deep. If this returns nothing, pgbouncer_auth doesn't exist
+# yet - run the bootstrap SQL first (docs/infra/pgbouncer.md, Bootstrap
+# step 1) - and this target then just writes an empty file; check with
+# "type docker\pgbouncer\userlist.txt" (Windows) or
+# "cat docker/pgbouncer/userlist.txt" before restarting pgbouncer.
 pgb-userlist: ## Regenerate docker/pgbouncer/userlist.txt from pg_shadow (run after rotating pgbouncer_auth's password)
-	docker-compose -f docker-compose.yml -f docker-compose.prod.yml \
-		exec db psql -U stock_user -d stock_db -tAc \
-		"SELECT concat('\"', usename, '\" \"', passwd, '\"') FROM pg_shadow WHERE usename = 'pgbouncer_auth'" \
-		> docker/pgbouncer/userlist.txt
-	@echo "Wrote docker/pgbouncer/userlist.txt — restart pgbouncer to pick it up: docker-compose -f docker-compose.yml -f docker-compose.prod.yml restart pgbouncer"
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml exec db psql -U stock_user -d stock_db -tAc "SELECT chr(34) || usename || chr(34) || ' ' || chr(34) || passwd || chr(34) FROM pg_shadow WHERE usename = 'pgbouncer_auth'" > docker/pgbouncer/userlist.txt
 
 pgb-pools: ## Show PgBouncer pool state (cl_active, cl_waiting, sv_active, sv_idle, maxwait)
 	docker-compose -f docker-compose.yml -f docker-compose.prod.yml \

@@ -78,6 +78,32 @@ antes que gunicorn mate al worker.
 
 ## Bootstrap (una sola vez, antes de levantar el stack)
 
+### Paso 0 — el archivo `userlist.txt` tiene que existir *antes* del primer `up`
+
+`docker/pgbouncer/userlist.txt` está en `.gitignore` (contiene un secreto) y
+se genera recién en el paso 3 de abajo. Pero `docker-compose.prod.yml`
+monta ese archivo como bind mount, y si no existe en el host, Docker crea
+una **carpeta vacía** en su lugar e intenta montarla sobre un archivo del
+contenedor — falla con algo como:
+
+```
+error mounting ".../docker/pgbouncer/userlist.txt" to rootfs at
+"/etc/pgbouncer/userlist.txt": not a directory
+```
+
+(común en Docker Desktop/Windows). Antes del primer `make prod-up`, creá el
+archivo con el placeholder para que el mount tenga qué montar — el paso 3
+lo va a pisar con el valor real más adelante:
+
+```
+copy docker\pgbouncer\userlist.txt.example docker\pgbouncer\userlist.txt   # Windows
+cp docker/pgbouncer/userlist.txt.example docker/pgbouncer/userlist.txt     # macOS/Linux
+```
+
+Con el placeholder, `pgbouncer` arranca y pasa el healthcheck (`pg_isready`
+no autentica), pero la app todavía no puede autenticar contra Postgres
+hasta completar los pasos 1–4.
+
 ### Autenticación: `auth_query`, no un `userlist.txt` por usuario
 
 `auth_type = scram-sha-256` con `auth_query` evita duplicar la contraseña de
@@ -85,8 +111,7 @@ cada usuario de la app en `userlist.txt`: PgBouncer llama a una función SQL
 que busca el verificador SCRAM directamente en `pg_shadow`, con un único
 usuario dedicado (`pgbouncer_auth`) para ejecutar esa función.
 
-1. **Crear el rol y la función.** `docker/postgres/initdb/01_pgbouncer_auth.sql`
-   crea `pgbouncer_auth` (sin privilegios sobre tablas) y
+1. **Crear el rol y la función.** `docker/postgres/initdb/01_pgbouncer_auth.sql`   crea `pgbouncer_auth` (sin privilegios sobre tablas) y
    `public.user_lookup()` (`SECURITY DEFINER`, con `REVOKE ALL FROM PUBLIC`
    explícito para que solo `pgbouncer_auth` pueda ejecutarla).
 
@@ -189,6 +214,7 @@ agregado de `SHOW POOLS`.
 | `no more connections allowed (max_client_conn)` | Más clientes de los que `max_client_conn` permite — revisar `workers`/réplicas vs. el `.ini`. |
 | Timeout / conexión cortada cerca de los 15s | `query_wait_timeout` alcanzado: el pool está saturado, no un problema de red. |
 | Pool agotado con `sv_active` bajo pero `cl_waiting` alto | Transacciones más largas de lo esperado (revisar si algo quedó fuera del `atomic()` esperado, o una query lenta reteniendo la conexión). |
+| `FATAL: bouncer config error` / `cannot use the reserved "pgbouncer" database as an auth_dbname` | `userlist.txt` no tiene una entrada estática válida para el usuario que se está conectando (típicamente `pgbouncer_auth` con el archivo vacío). Sin entrada estática, PgBouncer intenta resolverlo vía `auth_query` incluso para la consola de administración, y como no hay `auth_dbname` configurado, cae sobre la base `pgbouncer` reservada. Pasa si `make pgb-userlist` corrió **antes** de que el rol `pgbouncer_auth` existiera (la query no devuelve filas y pisa el archivo con contenido vacío — el target ahora corta con error en ese caso, ver `Makefile`). Solución: confirmar que el rol existe, generar `userlist.txt` de nuevo, y reiniciar `pgbouncer`. |
 
 ## Qué NO funciona en `pool_mode = transaction`
 
