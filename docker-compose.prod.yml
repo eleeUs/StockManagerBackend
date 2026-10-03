@@ -34,6 +34,12 @@ services:
       # config generation entirely — see the file's own header comment.
       - ./docker/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
       - ./docker/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+      # %include'd from pgbouncer.ini — the backend (pgbouncer->Postgres)
+      # credential, separate from userlist.txt above. Both files must
+      # exist on the host before the first `up` or Docker creates an
+      # empty directory at this path instead of failing — see
+      # docs/infra/pgbouncer.md §Bootstrap, Paso 0.
+      - ./docker/pgbouncer/databases.ini:/etc/pgbouncer/databases.ini:ro
     depends_on:
       db:
         condition: service_healthy

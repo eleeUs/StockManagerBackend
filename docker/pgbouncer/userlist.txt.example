@@ -1,20 +1,29 @@
 # docker/pgbouncer/userlist.txt.example
 #
-# Copy this to docker/pgbouncer/userlist.txt (gitignored — never commit
-# the real file) and replace the placeholder with the SCRAM verifier
-# for the `pgbouncer_auth` role created by
-# docker/postgres/initdb/01_pgbouncer_auth.sql.
+# Copy this to docker/pgbouncer/userlist.txt (gitignored - never commit
+# the real file) and replace the placeholder with the PLAINTEXT password
+# you set for the `pgbouncer_auth` role with:
+#   ALTER ROLE pgbouncer_auth WITH PASSWORD '<a real secret>';
+# (role created by docker/postgres/initdb/01_pgbouncer_auth.sql).
 #
-# This is the ONLY credential that belongs in this file: pgbouncer uses
-# it to authenticate itself to Postgres and run auth_query. App user
-# passwords are looked up dynamically via auth_query and are never
-# written here.
+# This is the ONLY credential that belongs in this file. PgBouncer uses
+# it for two things, both as pgbouncer_auth:
+#   1. to open its own connection to Postgres and run auth_query, and
+#   2. to let you log into the admin console (SHOW POOLS, etc.).
+# App user passwords are looked up dynamically via auth_query and are
+# never written here.
 #
-# Generate the real line with (see docs/infra/pgbouncer.md §Bootstrap):
-#   docker-compose -f docker-compose.yml -f docker-compose.prod.yml \
-#     exec db psql -U stock_user -d stock_db -tAc \
-#     "SELECT concat('\"', usename, '\" \"', passwd, '\"') \
-#      FROM pg_shadow WHERE usename = 'pgbouncer_auth'"
+# Why plaintext and NOT the SCRAM verifier from pg_shadow: PgBouncer is
+# the *client* on its connection to Postgres, and a SCRAM client needs
+# the real password to complete the handshake. The stored verifier
+# (what pg_shadow holds) lacks the ClientKey, so PgBouncer can verify
+# other people with it but cannot authenticate itself with it. The
+# symptom of using the verifier is the app failing to log in while
+# `SHOW POOLS` still works (the admin console is virtual and never
+# opens that backend connection).
 #
-# Format: "username" "SCRAM-SHA-256$<iterations>:<salt>$<hash>:<hash>"
-"pgbouncer_auth" "REPLACE_WITH_SCRAM_VERIFIER_FROM_PG_SHADOW"
+# Edit this file by hand - there is no generator target. Format:
+#   "username" "password"
+# Avoid double quotes inside the password (or double them: "" ).
+
+"pgbouncer_auth" "REPLACE_WITH_PGBOUNCER_AUTH_PASSWORD"

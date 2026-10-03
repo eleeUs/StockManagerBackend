@@ -1,8 +1,8 @@
 # Environment
 .env
 *.env
-.env.example
 .env.test.local.example
+.env.example
 
 # Python
 __pycache__/
@@ -36,6 +36,13 @@ htmlcov/
 # Docker
 postgres_data/
 
-# PgBouncer — contains the pgbouncer_auth SCRAM verifier (see
+# PgBouncer — contains the pgbouncer_auth plaintext password (see
 # docker/pgbouncer/userlist.txt.example and docs/infra/pgbouncer.md).
 docker/pgbouncer/userlist.txt
+# Scratch files from the old pg_shadow-based generator; never commit.
+docker/pgbouncer/userlist.txt.raw
+docker/pgbouncer/userlist.txt.tmp
+# PgBouncer — contains stock_user's plaintext password for the
+# pgbouncer-to-Postgres backend connection (see
+# docker/pgbouncer/databases.ini.example and docs/infra/pgbouncer.md).
+docker/pgbouncer/databases.ini

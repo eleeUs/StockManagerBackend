@@ -1,4 +1,4 @@
-.PHONY: help build up down migrate seed test test-v coverage lint shell logs prod-up pre-commit-install pre-commit-run pgb-userlist pgb-pools pgb-stats pgb-clients prod-migrate
+.PHONY: help build up down migrate seed test test-v coverage lint shell logs prod-up pre-commit-install pre-commit-run pgb-pools pgb-stats pgb-clients prod-migrate
 
 help: ## Show this help message
 	@echo "Available targets:"
@@ -56,24 +56,22 @@ prod-migrate: ## Apply migrations against Postgres directly, bypassing PgBouncer
 		run --rm -e DATABASE_URL=postgres://stock_user:stock_password@db:5432/stock_db \
 		api python manage.py migrate
 
-# See docker/pgbouncer/userlist.txt.example for what this generates and why.
-#
-# One line, one psql call, no shell conditionals, no awk. This target
-# used to be three commands with a POSIX "if [ ! -s ... ]" empty-file
-# check and an awk pipeline; both broke under a Windows Make whose
-# SHELL is cmd.exe (no /bin/sh on PATH), with cmd rejecting "!" outright
-# and never reaching the step that overwrites userlist.txt. The SQL
-# below builds the quoted "user" "hash" line with chr(34) so the shell
-# argument itself never contains a literal double quote to escape -
-# that's what made nested \" fragile across cmd.exe / PowerShell /
-# docker-compose's own arg parsing / the container's shell, four
-# layers deep. If this returns nothing, pgbouncer_auth doesn't exist
-# yet - run the bootstrap SQL first (docs/infra/pgbouncer.md, Bootstrap
-# step 1) - and this target then just writes an empty file; check with
-# "type docker\pgbouncer\userlist.txt" (Windows) or
-# "cat docker/pgbouncer/userlist.txt" before restarting pgbouncer.
-pgb-userlist: ## Regenerate docker/pgbouncer/userlist.txt from pg_shadow (run after rotating pgbouncer_auth's password)
-	docker-compose -f docker-compose.yml -f docker-compose.prod.yml exec db psql -U stock_user -d stock_db -tAc "SELECT chr(34) || usename || chr(34) || ' ' || chr(34) || passwd || chr(34) FROM pg_shadow WHERE usename = 'pgbouncer_auth'" > docker/pgbouncer/userlist.txt
+# docker/pgbouncer/userlist.txt is edited BY HAND, not generated. See
+# docker/pgbouncer/userlist.txt.example and docs/infra/pgbouncer.md
+# (Bootstrap) for why: auth_user's own credential must be the PLAINTEXT
+# password, not a SCRAM hash pulled from pg_shadow -- PgBouncer needs
+# the real password to log into Postgres as pgbouncer_auth itself
+# (both to run auth_query and to open each app user's pooled
+# connections), and a stored SCRAM verifier alone is cryptographically
+# insufficient for that (it lacks the ClientKey, which only exists
+# after a real client completes a full handshake with the actual
+# password). This used to be a psql-query-plus-shell-formatting target;
+# every version of it broke under a different combination of
+# cmd.exe / PowerShell / docker-compose's arg parsing / the container's
+# shell -- and querying pg_shadow for a SCRAM hash was solving the
+# wrong problem besides. Open docker/pgbouncer/userlist.txt in an
+# editor and write one line yourself:
+#   "pgbouncer_auth" "<the password you set with ALTER ROLE>"
 
 pgb-pools: ## Show PgBouncer pool state (cl_active, cl_waiting, sv_active, sv_idle, maxwait)
 	docker-compose -f docker-compose.yml -f docker-compose.prod.yml \

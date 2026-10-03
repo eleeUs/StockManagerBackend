@@ -19,8 +19,10 @@
 -- The password below is a placeholder. Rotate it immediately after
 -- first run:
 --   ALTER ROLE pgbouncer_auth WITH PASSWORD '<a real secret>';
--- and regenerate docker/pgbouncer/userlist.txt from pg_shadow
--- afterwards (docs/infra/pgbouncer.md).
+-- and write that same plaintext password into
+-- docker/pgbouncer/userlist.txt by hand (docs/infra/pgbouncer.md);
+-- PgBouncer needs the real password, not a pg_shadow verifier, to log
+-- in as pgbouncer_auth.
 
 CREATE ROLE pgbouncer_auth WITH LOGIN PASSWORD 'CHANGE_ME_IMMEDIATELY';
 

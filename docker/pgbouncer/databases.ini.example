@@ -1,0 +1,17 @@
+# docker/pgbouncer/databases.ini.example
+#
+# Copy this to docker/pgbouncer/databases.ini (gitignored - never commit
+# the real file) and replace REPLACE_WITH_STOCK_USER_PASSWORD with the
+# real password for stock_user - the same one from DATABASE_URL in your
+# .env (postgres://stock_user:<this password>@db:5432/stock_db).
+#
+# What this is for: PgBouncer's own connection to Postgres (the
+# "backend" hop) as a FIXED credential - separate from how the app's
+# login to PgBouncer itself is verified (that part uses auth_query,
+# see pgbouncer.ini and userlist.txt.example). See
+# docs/infra/pgbouncer.md, section "Dos capas de autenticacion".
+#
+# Host/port point at the `db` service (Postgres directly), never at
+# pgbouncer itself.
+[databases]
+stock_db = host=db port=5432 dbname=stock_db user=stock_user password=REPLACE_WITH_STOCK_USER_PASSWORD

@@ -31,6 +31,33 @@ gunicorn (sync workers) → PgBouncer :6432 (pool_mode=transaction) → Postgres
   soporta más clientes por conexión real, y es compatible con el código
   actual (ver "Qué no funciona" más abajo).
 
+### Dos capas de autenticación, no una
+
+- **Cliente → PgBouncer**: `auth_type = scram-sha-256` con `auth_query`.
+  PgBouncer verifica lo que manda la app contra el hash real en `pg_shadow`
+  de Postgres, en el momento — no hay que mantener nada sincronizado a mano
+  para los usuarios de la app. La única excepción es `pgbouncer_auth`
+  (`auth_user`): PgBouncer se conecta a Postgres *como* ese rol para correr
+  `auth_query`, y para esa conexión saliente necesita su contraseña en
+  **texto plano** en `userlist.txt` (ver Bootstrap, paso 3).
+- **PgBouncer → Postgres** (la conexión de backend real): una credencial
+  **fija**, en `docker/pgbouncer/databases.ini` (`%include`ado desde
+  `pgbouncer.ini`), no un reenvío de la autenticación del cliente.
+
+La opción "más elegante" sería que PgBouncer reusara la autenticación SCRAM
+del cliente también para su propia conexión a Postgres (sin credencial fija
+duplicada en ningún lado) — PgBouncer lo soporta, pero es un mecanismo con
+regresiones conocidas específicas de versión (ver
+[pgbouncer#1501](https://github.com/pgbouncer/pgbouncer/issues/1501), que
+hace fallar exactamente esto con `cannot do SCRAM authentication` /
+`server_login_retry`). Con una sola base y un solo usuario de aplicación acá,
+no vale la pena esa fragilidad: una credencial fija para el backend es el
+patrón estándar y evita depender de esa parte más delicada de PgBouncer.
+
+Esto significa que, si rotás la contraseña de `stock_user` en Postgres,
+hay que actualizar **dos** lugares: `.env` (`DATABASE_URL`) y
+`docker/pgbouncer/databases.ini` — no se propaga solo.
+
 ## Sizing — cómo se llegó a estos números
 
 ### `default_pool_size` (transacciones concurrentes de escritura, no RPS)
@@ -78,38 +105,41 @@ antes que gunicorn mate al worker.
 
 ## Bootstrap (una sola vez, antes de levantar el stack)
 
-### Paso 0 — el archivo `userlist.txt` tiene que existir *antes* del primer `up`
+### Paso 0 — `userlist.txt` y `databases.ini` tienen que existir *antes* del primer `up`
 
-`docker/pgbouncer/userlist.txt` está en `.gitignore` (contiene un secreto) y
-se genera recién en el paso 3 de abajo. Pero `docker-compose.prod.yml`
-monta ese archivo como bind mount, y si no existe en el host, Docker crea
-una **carpeta vacía** en su lugar e intenta montarla sobre un archivo del
-contenedor — falla con algo como:
+`docker/pgbouncer/userlist.txt` y `docker/pgbouncer/databases.ini` están en
+`.gitignore` (contienen secretos) y se completan recién más abajo. Pero
+`docker-compose.prod.yml` los monta como bind mount, y si alguno no existe
+en el host, Docker crea una **carpeta vacía** en su lugar e intenta
+montarla sobre un archivo del contenedor — falla con algo como:
 
 ```
 error mounting ".../docker/pgbouncer/userlist.txt" to rootfs at
 "/etc/pgbouncer/userlist.txt": not a directory
 ```
 
-(común en Docker Desktop/Windows). Antes del primer `make prod-up`, creá el
-archivo con el placeholder para que el mount tenga qué montar — el paso 3
-lo va a pisar con el valor real más adelante:
+(común en Docker Desktop/Windows). Antes del primer `make prod-up`, creá
+los dos archivos con sus placeholders para que el mount tenga qué montar —
+los pasos de abajo los pisan con el valor real:
 
 ```
-copy docker\pgbouncer\userlist.txt.example docker\pgbouncer\userlist.txt   # Windows
-cp docker/pgbouncer/userlist.txt.example docker/pgbouncer/userlist.txt     # macOS/Linux
+copy docker\pgbouncer\userlist.txt.example docker\pgbouncer\userlist.txt       # Windows
+copy docker\pgbouncer\databases.ini.example docker\pgbouncer\databases.ini     # Windows
+cp docker/pgbouncer/userlist.txt.example docker/pgbouncer/userlist.txt         # macOS/Linux
+cp docker/pgbouncer/databases.ini.example docker/pgbouncer/databases.ini       # macOS/Linux
 ```
 
-Con el placeholder, `pgbouncer` arranca y pasa el healthcheck (`pg_isready`
-no autentica), pero la app todavía no puede autenticar contra Postgres
-hasta completar los pasos 1–4.
+Con los placeholders, `pgbouncer` arranca y pasa el healthcheck (`pg_isready`
+no autentica), pero la app todavía no puede conectar hasta completar el
+resto de esta sección.
 
 ### Autenticación: `auth_query`, no un `userlist.txt` por usuario
 
 `auth_type = scram-sha-256` con `auth_query` evita duplicar la contraseña de
 cada usuario de la app en `userlist.txt`: PgBouncer llama a una función SQL
 que busca el verificador SCRAM directamente en `pg_shadow`, con un único
-usuario dedicado (`pgbouncer_auth`) para ejecutar esa función.
+usuario dedicado (`pgbouncer_auth`) para ejecutar esa función. Ese usuario
+es el único cuya contraseña sí vive en `userlist.txt`.
 
 1. **Crear el rol y la función.** `docker/postgres/initdb/01_pgbouncer_auth.sql`   crea `pgbouncer_auth` (sin privilegios sobre tablas) y
    `public.user_lookup()` (`SECURITY DEFINER`, con `REVOKE ALL FROM PUBLIC`
@@ -134,19 +164,39 @@ usuario dedicado (`pgbouncer_auth`) para ejecutar esa función.
      "ALTER ROLE pgbouncer_auth WITH PASSWORD '<secreto real>';"
    ```
 
-3. **Generar `docker/pgbouncer/userlist.txt`.** No se versiona (está en
-   `.gitignore`; ver `docker/pgbouncer/userlist.txt.example` para el
-   formato). Generarlo desde `pg_shadow` después del paso 2:
+3. **Escribir `docker/pgbouncer/userlist.txt` a mano.** No se versiona (está
+   en `.gitignore`; ver `docker/pgbouncer/userlist.txt.example`). Una sola
+   línea, con la **misma contraseña en texto plano** que pusiste en el paso 2:
    ```
-   make pgb-userlist
+   "pgbouncer_auth" "<secreto real>"
    ```
-   Este archivo solo contiene el verificador de `pgbouncer_auth` — nunca las
-   contraseñas de los usuarios de la app, que `auth_query` resuelve en el
-   momento.
+   **No usar el verificador `SCRAM-SHA-256$...` de `pg_shadow`.** PgBouncer es
+   *cliente* en su conexión a Postgres (para correr `auth_query`), y un
+   cliente SCRAM necesita la contraseña real: el verificador almacenado no
+   incluye la `ClientKey`, así que sirve para *verificar* a otros pero no para
+   autenticarse a sí mismo. Con el verificador, la consola de admin
+   (`SHOW POOLS`) funciona —es virtual, no abre conexión de backend— pero la
+   app falla al loguearse. Por eso ya no existe `make pgb-userlist`.
+   Este archivo nunca contiene contraseñas de usuarios de la app.
 
 4. Si `pgbouncer` ya estaba corriendo, reiniciarlo para que tome el archivo
    nuevo: `docker-compose -f docker-compose.yml -f docker-compose.prod.yml
    restart pgbouncer`.
+
+5. **Completar `docker/pgbouncer/databases.ini`** con la contraseña real de
+   `stock_user` (la misma de `DATABASE_URL` en tu `.env`). A diferencia de
+   `userlist.txt`, esto no se genera con un comando — es la credencial fija
+   de la conexión de backend (ver "Dos capas de autenticación" más arriba),
+   así que se copia a mano:
+   ```
+   copy docker\pgbouncer\databases.ini.example docker\pgbouncer\databases.ini   # si no lo hiciste en el Paso 0
+   ```
+   Editá el archivo y reemplazá `REPLACE_WITH_STOCK_USER_PASSWORD` por la
+   contraseña real. Si ya habías copiado el placeholder en el Paso 0, este
+   paso es solo editar el archivo, no volver a copiarlo (lo pisarías).
+
+6. Reiniciar `pgbouncer` de nuevo para que tome `databases.ini`:
+   `docker-compose -f docker-compose.yml -f docker-compose.prod.yml restart pgbouncer`.
 
 ## Acceso directo (bypass del pool)
 
@@ -214,7 +264,9 @@ agregado de `SHOW POOLS`.
 | `no more connections allowed (max_client_conn)` | Más clientes de los que `max_client_conn` permite — revisar `workers`/réplicas vs. el `.ini`. |
 | Timeout / conexión cortada cerca de los 15s | `query_wait_timeout` alcanzado: el pool está saturado, no un problema de red. |
 | Pool agotado con `sv_active` bajo pero `cl_waiting` alto | Transacciones más largas de lo esperado (revisar si algo quedó fuera del `atomic()` esperado, o una query lenta reteniendo la conexión). |
-| `FATAL: bouncer config error` / `cannot use the reserved "pgbouncer" database as an auth_dbname` | `userlist.txt` no tiene una entrada estática válida para el usuario que se está conectando (típicamente `pgbouncer_auth` con el archivo vacío). Sin entrada estática, PgBouncer intenta resolverlo vía `auth_query` incluso para la consola de administración, y como no hay `auth_dbname` configurado, cae sobre la base `pgbouncer` reservada. Pasa si `make pgb-userlist` corrió **antes** de que el rol `pgbouncer_auth` existiera (la query no devuelve filas y pisa el archivo con contenido vacío — el target ahora corta con error en ese caso, ver `Makefile`). Solución: confirmar que el rol existe, generar `userlist.txt` de nuevo, y reiniciar `pgbouncer`. |
+| `FATAL: bouncer config error` / `cannot use the reserved "pgbouncer" database as an auth_dbname` | `userlist.txt` no tiene una entrada estática válida para el usuario que se está conectando (típicamente `pgbouncer_auth` con el archivo vacío). Sin entrada estática, PgBouncer intenta resolverlo vía `auth_query` incluso para la consola de administración, y como no hay `auth_dbname` configurado, cae sobre la base `pgbouncer` reservada. Pasa si `userlist.txt` quedó vacío o sin la línea de `pgbouncer_auth`. Solución: confirmar que el rol existe, escribir la línea a mano (paso 3 del Bootstrap) y reiniciar `pgbouncer`. |
+| La consola de admin (`SHOW POOLS`) anda pero la app no conecta; en el log de `pgbouncer`, errores de login contra el servidor al correr `auth_query` | `userlist.txt` tiene el verificador `SCRAM-SHA-256$...` de `pg_shadow` en vez de la contraseña en texto plano de `pgbouncer_auth`. Reemplazarlo por `"pgbouncer_auth" "<contraseña>"` (la del `ALTER ROLE`) y reiniciar `pgbouncer`. |
+| `FATAL: server login has been failing, cached error: failed to answer authreq (server_login_retry)` (del lado del cliente), con `cannot do SCRAM authentication: ...` o `server login failed: wrong password type` en el log de `pgbouncer` | PgBouncer no puede abrir su propia conexión de backend contra Postgres — es el error de la capa 2 descripta en "Dos capas de autenticación". Casi siempre significa que `docker/pgbouncer/databases.ini` no existe, tiene el placeholder sin reemplazar, o la contraseña ahí adentro no coincide con la real de `stock_user`. Confirmalo con `docker-compose ... exec pgbouncer cat /etc/pgbouncer/databases.ini` y comparalo contra `DATABASE_URL` en tu `.env`; después reiniciá `pgbouncer`. |
 
 ## Qué NO funciona en `pool_mode = transaction`
 
